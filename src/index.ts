@@ -1,0 +1,59 @@
+import express from 'express';
+import cors from 'cors';
+import { ENV } from './config/env.config';
+import { initDb } from './config/db.config';
+import logger from './config/logger';
+
+import agentRoutes from './routes/agents.routes';
+import modelsRoutes from './routes/models.routes';
+import temporalRoutes from './routes/temporal.routes';
+import { getAgentCard } from './controllers/agents.controller';
+
+const app = express();
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+
+// Log requests
+app.use((req, res, next) => {
+    logger.info({ 
+        method: req.method, 
+        url: req.url,
+        ip: req.ip 
+    }, 'Incoming Request');
+    next();
+});
+
+// Routes
+app.use('/backend/api/models', modelsRoutes);
+app.use('/backend/api/agents', agentRoutes);
+app.use('/', temporalRoutes);
+app.get('/:slug/.well-known/agent.json', getAgentCard);
+
+// Health check
+app.get('/health', (req, res) => {
+    res.json({ status: 'UP', service: 'agent-service', version: '1.0.0' });
+});
+
+// Error Handling
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    logger.error({ err, url: req.url }, 'Unhandled error occurred');
+    res.status(500).json({ error: 'Internal Server Error' });
+});
+
+const start = async () => {
+    try {
+        await initDb();
+        
+        app.listen(ENV.PORT, () => {
+            logger.info(`Agent service listening on port ${ENV.PORT} in ${ENV.NODE_ENV} mode`);
+        });
+    } catch (err) {
+        logger.fatal({ err }, 'Failed to start agent-service');
+        process.exit(1);
+    }
+};
+
+start();
+
