@@ -103,7 +103,7 @@ export async function callStandardTool(input: {
   userId: string
 }): Promise<any> {
   try {
-    const response = await axios.post('http://localhost:3001/backend/api/tools/execute', {
+    const response = await axios.post(`${ENV.TOOLS_SERVICE_URL}/backend/api/tools/execute`, {
       name: input.toolName,
       parameters: input.arguments
     }, {
@@ -124,7 +124,7 @@ export async function callMCPTool(input: {
   userId: string
 }): Promise<any> {
   try {
-    const response = await axios.post('http://localhost:3001/backend/api/mcp/call', {
+    const response = await axios.post(`${ENV.TOOLS_SERVICE_URL}/backend/api/mcp/call`, {
       server_id: input.serverName,
       name: input.toolName,
       arguments: input.arguments
@@ -145,7 +145,7 @@ export async function queryKnowledgeBase(input: {
   userId: string
 }): Promise<any> {
   try {
-    const response = await axios.post(`http://localhost:3001/backend/api/knowledge/bases/${input.kbId}/query`, {
+    const response = await axios.post(`${ENV.TOOLS_SERVICE_URL}/backend/api/knowledge/bases/${input.kbId}/query`, {
       query: input.query,
       limit: 10
     }, {
@@ -165,7 +165,7 @@ export async function queryKnowledgeGraph(input: {
   userId: string
 }): Promise<any> {
   try {
-    const response = await axios.post(`http://localhost:3001/backend/api/knowledge/graphs/${input.kgId}/query`, {
+    const response = await axios.post(`${ENV.TOOLS_SERVICE_URL}/backend/api/knowledge/graphs/${input.kgId}/query`, {
       query: input.query,
       depth: 2
     }, {

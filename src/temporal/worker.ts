@@ -1,15 +1,21 @@
-import { Worker } from '@temporalio/worker';
+import { Worker, NativeConnection } from '@temporalio/worker';
 import * as activities from './activities';
 
 async function run() {
+  const address = process.env.TEMPORAL_ADDRESS || 'localhost:7233';
+  const connection = await NativeConnection.connect({
+    address,
+  });
+
   const worker = await Worker.create({
+    connection,
     workflowsPath: require.resolve('./workflows'),
     activities,
     taskQueue: 'simulated-agent-queue',
     namespace: 'default', // Using default namespace as it's the standard for local development
   });
 
-  console.log('Worker is starting...');
+  console.log(`Worker is starting on ${address}...`);
   await worker.run();
 }
 
