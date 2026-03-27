@@ -231,20 +231,21 @@ export async function buildSystemPrompt(input: {
     // 3. Role Targeting
     // 4. Global Active Prompt
     const promptResult = await pool.query(
-      `SELECT content, prompt_text 
-       FROM prompts 
-       WHERE type = $1 
+      `SELECT p.content, p.prompt_text 
+       FROM prompts p
+       JOIN prompt_types pt ON p.prompt_type_id = pt.id
+       WHERE pt.name = $1 
        AND (
-         $2 = ANY(targeting_agents) OR 
-         $3 = ANY(targeting_users) OR 
-         targeting_roles && $4 OR
-         is_active = true
+         $2 = ANY(p.targeting_agents) OR 
+         $3 = ANY(p.targeting_users) OR 
+         p.targeting_roles && $4 OR
+         p.is_active = true
        )
        ORDER BY 
-         ($2 = ANY(targeting_agents)) DESC,
-         ($3 = ANY(targeting_users)) DESC,
-         (targeting_roles && $4) DESC,
-         is_active DESC
+         ($2 = ANY(p.targeting_agents)) DESC,
+         ($3 = ANY(p.targeting_users)) DESC,
+         (p.targeting_roles && $4) DESC,
+         p.is_active DESC
        LIMIT 1`,
       ['agent-execution', agentSlug, userId, roles]
     );
