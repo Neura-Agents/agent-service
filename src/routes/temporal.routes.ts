@@ -8,8 +8,12 @@ import {
   terminateTemporalWorkflow,
   getActiveWorkflows
 } from '../controllers/temporal.controller';
+import { authenticate } from '../middlewares/auth.middleware';
 
 const router = Router();
+
+// Apply authentication to all routes
+router.use(authenticate);
 
 // Endpoint for triggering: http://localhost:3002/<agent-slug>/stream
 router.post('/:slug/stream', triggerTemporalWorkflow);

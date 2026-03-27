@@ -37,7 +37,10 @@ export const authenticate = (req: AuthenticatedRequest, res: Response, next: Nex
                     id: decoded.sub,
                     username: decoded.preferred_username,
                     email: decoded.email,
-                    roles: decoded.resource_access?.['neura-agents-client']?.roles || []
+                    roles: [
+                        ...(decoded.realm_access?.roles || []),
+                        ...(decoded.resource_access?.['neura-agents-client']?.roles || [])
+                    ]
                 };
                 return next();
             }
