@@ -141,9 +141,15 @@ async function pollAndStreamEvents(
   });
 }
 
+import { AuthenticatedRequest } from '../middlewares/auth.middleware';
+
 export const triggerTemporalWorkflow = async (req: Request, res: Response) => {
   const { slug } = req.params;
   const { messages } = req.body;
+  const authReq = req as AuthenticatedRequest;
+  const userId = authReq.user?.id || 'system';
+  const userRoles = authReq.user?.roles || [];
+  
   const workflowId = `agent-simulation-${slug}-${uuidv4()}`;
 
   // Set headers for SSE
@@ -167,6 +173,8 @@ export const triggerTemporalWorkflow = async (req: Request, res: Response) => {
         slug: slug,
         messages: messages || [],
         traceId: traceId,
+        userId: userId,
+        userRoles: userRoles,
         maxIterations: parseInt(process.env.AGENT_MAX_ITERATIONS || '10'),
         maxToolOutputTokens: parseInt(process.env.AGENT_MAX_TOOL_OUTPUT_TOKENS || '10000'),
         maxContextTokens: parseInt(process.env.AGENT_MAX_CONTEXT_TOKENS || '50000')

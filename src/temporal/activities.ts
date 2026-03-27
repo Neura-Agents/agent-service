@@ -182,7 +182,9 @@ export async function queryKnowledgeGraph(input: {
 export async function buildSystemPrompt(input: {
   slug: string,
   userPrompt: string,
-  executionContext?: string
+  executionContext?: string,
+  userId?: string,
+  userRoles?: string[]
 }): Promise<string> {
   const agent = await getAgentConfig(input.slug);
   
@@ -217,14 +219,52 @@ export async function buildSystemPrompt(input: {
 
   const formatNames = (infoList: any[]) => infoList.length > 0 ? infoList.map(i => i.name.replace(/\s+/g, '_')).join(', ') : 'None';
 
-  const templatePath = path.join(__dirname, '../prompts/agent_system.prompt');
   let template: string;
   try {
-    template = await fs.readFile(templatePath, 'utf8');
-    template = template.replace(/^---[\s\S]*?---\n*/, '');
+    const userId = input.userId || 'unknown';
+    const roles = input.userRoles || [];
+    const agentSlug = agent.slug;
+
+    // Prioritized Search:
+    // 1. Specific Agent Targeting (by Slug)
+    // 2. Specific User Targeting (by ID)
+    // 3. Role Targeting
+    // 4. Global Active Prompt
+    const promptResult = await pool.query(
+      `SELECT content, prompt_text 
+       FROM prompts 
+       WHERE type = $1 
+       AND (
+         $2 = ANY(targeting_agents) OR 
+         $3 = ANY(targeting_users) OR 
+         targeting_roles && $4 OR
+         is_active = true
+       )
+       ORDER BY 
+         ($2 = ANY(targeting_agents)) DESC,
+         ($3 = ANY(targeting_users)) DESC,
+         (targeting_roles && $4) DESC,
+         is_active DESC
+       LIMIT 1`,
+      ['agent-execution', agentSlug, userId, roles]
+    );
+
+    if (promptResult.rows.length > 0) {
+      template = promptResult.rows[0].prompt_text || promptResult.rows[0].content;
+      // If we used content, ensure we strip frontmatter
+      if (!promptResult.rows[0].prompt_text) {
+          template = template.replace(/^---[\s\S]*?---\n*/, '');
+      }
+    } else {
+      // Fallback to local file if no active prompt in DB yet
+      const templatePath = path.join(__dirname, '../prompts/agent_system.prompt');
+      template = await fs.readFile(templatePath, 'utf8');
+      template = template.replace(/^---[\s\S]*?---\n*/, '');
+    }
   } catch (err) {
+    console.error('Prompt selection error:', err);
     throw ApplicationFailure.create({
-      message: 'System prompt template missing',
+      message: 'System prompt template missing or database error',
       type: 'TemplateError',
       nonRetryable: true
     });

@@ -33,6 +33,8 @@ export interface SimulatedAgentInput {
   slug: string;
   messages?: any[];
   traceId?: string;
+  userId?: string;
+  userRoles?: string[];
   maxIterations?: number;
   maxToolOutputTokens?: number;
   maxContextTokens?: number;
@@ -157,7 +159,12 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
 
     // 2. Build System Prompt
     const userLastPrompt = history[history.length - 1]?.content || '';
-    const finalSystemPrompt = await buildSystemPrompt({ slug: input.slug, userPrompt: userLastPrompt });
+    const finalSystemPrompt = await buildSystemPrompt({ 
+      slug: input.slug, 
+      userPrompt: userLastPrompt,
+      userId: input.userId,
+      userRoles: input.userRoles
+    });
     emitEvent('info', { status: 'system_prompt_built' });
 
     // 3. Execution Loop

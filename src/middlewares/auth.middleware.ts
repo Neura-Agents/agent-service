@@ -7,6 +7,7 @@ export interface AuthenticatedRequest extends Request {
         id: string;
         username?: string;
         email?: string;
+        roles?: string[];
     };
 }
 
@@ -35,7 +36,8 @@ export const authenticate = (req: AuthenticatedRequest, res: Response, next: Nex
                 req.user = {
                     id: decoded.sub,
                     username: decoded.preferred_username,
-                    email: decoded.email
+                    email: decoded.email,
+                    roles: decoded.resource_access?.['neura-agents-client']?.roles || []
                 };
                 return next();
             }
@@ -46,7 +48,7 @@ export const authenticate = (req: AuthenticatedRequest, res: Response, next: Nex
 
     // Dev/Local fallback
     if (userIdHeader) {
-        req.user = { id: userIdHeader };
+        req.user = { id: userIdHeader, roles: ['admin'] };
         return next();
     }
 
