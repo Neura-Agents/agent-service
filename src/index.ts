@@ -8,6 +8,7 @@ import agentRoutes from './routes/agents.routes';
 import modelsRoutes from './routes/models.routes';
 import temporalRoutes from './routes/temporal.routes';
 import { getAgentCard } from './controllers/agents.controller';
+import { authenticate, tryAuthenticate } from './middlewares/auth.middleware';
 
 const app = express();
 
@@ -25,12 +26,12 @@ app.use((req, res, next) => {
     next();
 });
 
-// Public Discovery Routes (Must be above authenticated routers)
-app.get('/:slug/.well-known/agent.json', getAgentCard);
+// Public Discovery Routes (SECURE: Visibility-aware)
+app.get('/:slug/.well-known/agent.json', tryAuthenticate, getAgentCard);
 
 // Protected Routes
-app.use('/backend/api/models', modelsRoutes);
-app.use('/backend/api/agents', agentRoutes);
+app.use('/backend/api/models', authenticate, modelsRoutes);
+app.use('/backend/api/agents', authenticate, agentRoutes);
 app.use('/', temporalRoutes);
 
 // Health check

@@ -34,10 +34,11 @@ export const listAgents = async (req: AuthenticatedRequest, res: Response) => {
     }
 };
 
-export const getAgentCard = async (req: any, res: Response) => {
+export const getAgentCard = async (req: AuthenticatedRequest, res: Response) => {
     try {
-        const { slug } = req.params;
-        const agent = await agentsService.getAgentBySlug(slug);
+        const slug = req.params.slug as string;
+        const userId = req.user?.id;
+        const agent = await agentsService.getAgentBySlug(slug, userId);
 
         if (!agent) {
             return res.status(404).json({ error: 'Agent not found' });

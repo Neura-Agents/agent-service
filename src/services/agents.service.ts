@@ -113,16 +113,16 @@ export class AgentsService {
         }
     }
 
-    async getAgentBySlug(slug: string): Promise<Agent | null> {
+    async getAgentBySlug(slug: string, requestingUserId?: string): Promise<Agent | null> {
         try {
-            // 1. Fetch Agent with basic capabilities join for tools, knowledge bases, graphs, and MCP
-            const result = await pool.query(
-                `SELECT a.*, 
+            // 1. Fetch Agent with basic capabilities join
+            // SECURE: Enforce visibility checks in the query
+            const query = `
+                SELECT a.*, 
                  COALESCE(
                    (SELECT json_agg(json_build_object(
                       'capability_id', COALESCE(t.id::text, kb.id::text, kg.id::text, mcp.id::text, ac.capability_id), 
                       'capability_type', ac.capability_type,
-
                       'name', COALESCE(t.name, kb.name, kg.name, mcp.name, ac.capability_id),
                       'description', COALESCE(t.description, kb.description, kg.description, mcp.description, '')
                    ))
@@ -131,14 +131,15 @@ export class AgentsService {
                     LEFT JOIN knowledge_bases kb ON ac.capability_type = 'kb' AND ac.capability_id = kb.id::text
                     LEFT JOIN knowledge_graphs kg ON ac.capability_type = 'kg' AND ac.capability_id = kg.id::text
                     LEFT JOIN mcp_tools mcp ON ac.capability_type = 'mcp' AND (ac.capability_id = mcp.id::text OR ac.capability_id = (mcp.name || '-' || mcp.server_id))
-
-
                     WHERE ac.agent_id = a.id),
                    '[]'
                  ) as capabilities
-                 FROM agents a WHERE slug = $1`,
-                [slug]
-            );
+                 FROM agents a 
+                 WHERE a.slug = $1 
+                 AND (a.visibility = 'public' OR a.user_id = $2)
+            `;
+            
+            const result = await pool.query(query, [slug, requestingUserId || 'ANONYMOUS']);
 
             if (result.rows.length === 0) return null;
             return result.rows[0];
