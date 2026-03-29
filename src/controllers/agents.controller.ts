@@ -44,17 +44,25 @@ export const getAgentCard = async (req: any, res: Response) => {
         }
 
         const baseUrl = process.env.BASE_URL || 'http://localhost:8000';
-        const agentUrl = `${baseUrl}/${slug}`;
+        const agentUrl = `${baseUrl}/backend/api/v1/agent-execution/${slug}/stream`;
 
         // Format to the requested structure
         const agentCard = {
+            protocolVersion: "0.3.0",
+            capabilities: {
+                pushNotifications: false,
+                stateTransitionHistory: false,
+                streaming: true
+            },
+            defaultInputModes: ["text"],
+            defaultOutputModes: ["text"],
             name: agent.name,
             description: agent.description,
             version: agent.version || '1.0.0',
             url: agentUrl,
             tags: agent.tags || [],
             provider: {
-                organization: "Acme AI", // Could be dynamic if we add organization to users
+                organization: "Acme AI",
                 url: "https://acme-ai.example.com"
             },
             model: {
@@ -66,9 +74,9 @@ export const getAgentCard = async (req: any, res: Response) => {
                 max_tokens: Number(agent.max_tokens || 2048)
             },
             auth: {
-              type: "api_key",
-              in: "header",
-              name: "x-api-key"
+                type: "api_key",
+                in: "header",
+                name: "x-api-key"
             },
             endpoints: {
                 invoke: `${agentUrl}/invoke`,
@@ -85,12 +93,17 @@ export const getAgentCard = async (req: any, res: Response) => {
                     url: `${agentUrl}/invoke`
                 }
             ],
+            preferredTransport: "JSONRPC",
             skills: (agent.capabilities || []).map((cap: any) => ({
                 id: cap.capability_id,
                 name: cap.name || cap.capability_id,
-                description: cap.description || `A ${cap.capability_type} capability`
-            }))
-
+                description: cap.description || `A ${cap.capability_type} capability`,
+                inputModes: ["text"],
+                outputModes: ["text"],
+                tags: [cap.capability_type || "general"],
+                examples: []
+            })),
+            supportsAuthenticatedExtendedCard: false
         };
 
         res.json(agentCard);
@@ -152,7 +165,7 @@ export const generateCreationLink = async (req: AuthenticatedRequest, res: Respo
         const link = await agentsService.generateCreationLink(req.body, userId);
         res.status(200).json(link);
     } catch (error: any) {
-        logger.error({ error }, 'Controller: Failed to generate creation link');
+        logger.error({ err: error }, 'Controller: Failed to generate creation link');
         if (error.message.startsWith('Validation Error:')) {
             return res.status(400).json({ error: error.message });
         }

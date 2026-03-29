@@ -22,4 +22,6 @@ export const ENV = {
     },
     FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:8080',
     TOOLS_SERVICE_URL: process.env.TOOLS_SERVICE_URL || 'http://localhost:3001',
+    API_KEY_SERVICE_URL: process.env.API_KEY_SERVICE_URL || 'http://api-key-service:3008',
+    PLATFORM_SERVICE_URL: process.env.PLATFORM_SERVICE_URL || 'http://platform-service:3006',
 };

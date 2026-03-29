@@ -25,11 +25,13 @@ app.use((req, res, next) => {
     next();
 });
 
-// Routes
+// Public Discovery Routes (Must be above authenticated routers)
+app.get('/:slug/.well-known/agent.json', getAgentCard);
+
+// Protected Routes
 app.use('/backend/api/models', modelsRoutes);
 app.use('/backend/api/agents', agentRoutes);
 app.use('/', temporalRoutes);
-app.get('/:slug/.well-known/agent.json', getAgentCard);
 
 // Health check
 app.get('/health', (req, res) => {

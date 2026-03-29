@@ -281,6 +281,14 @@ export class AgentsService {
         }
 
         // Validate Capabilities
+        if (dto.capabilities && typeof dto.capabilities === 'string') {
+            try {
+                dto.capabilities = JSON.parse(dto.capabilities);
+            } catch (e) {
+                // Keep as is if not parseable
+            }
+        }
+
         if (dto.capabilities && Array.isArray(dto.capabilities)) {
             for (const cap of dto.capabilities) {
                 let isValid = false;
@@ -298,7 +306,8 @@ export class AgentsService {
                         isValid = options.knowledge_graphs.some((kg: any) => kg.id === cap.capability_id);
                         break;
                     default:
-                        throw new Error(`Validation Error: Invalid capability_type '${cap.capability_type}' for '${cap.capability_id}'`);
+                        const receivedStr = typeof cap === 'object' ? JSON.stringify(cap) : String(cap);
+                        throw new Error(`Validation Error: Invalid capability object or type. Received: ${receivedStr}. Expected { capability_type: 'tool'|'mcp'|'kb'|'kg', capability_id: 'string' }`);
                 }
 
                 if (!isValid) {

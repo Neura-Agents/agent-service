@@ -5,6 +5,78 @@ import path from 'path';
 import axios from 'axios';
 import { ENV } from '../config/env.config';
 
+/**
+ * Builds a JSON schema from a flat list of tool parameters, respecting hierarchy.
+ */
+function buildToolSchema(parameters: any[]): any {
+  if (!parameters || parameters.length === 0) {
+    return { type: 'object', properties: {}, required: [] };
+  }
+
+  // Create a map for quick lookup and initialize properties
+  const paramMap = new Map();
+  const rootParams: any[] = [];
+
+  parameters.forEach(p => {
+    paramMap.set(p.id, { ...p, properties: {}, required_fields: [] });
+  });
+
+  // Build the tree
+  parameters.forEach(p => {
+    if (p.parent_id && paramMap.has(p.parent_id)) {
+      const parent = paramMap.get(p.parent_id);
+      parent.properties[p.name] = paramMap.get(p.id);
+      if (p.required) {
+        parent.required_fields.push(p.name);
+      }
+    } else {
+      rootParams.push(paramMap.get(p.id));
+    }
+  });
+
+  // Recursive function to convert our tree to JSON Schema format
+  const convertToSchema = (param: any): any => {
+    const schema: any = {
+      type: param.type,
+      description: param.description || '',
+    };
+
+    if (param.type === 'object') {
+      schema.properties = {};
+      schema.required = param.required_fields || [];
+      Object.keys(param.properties).forEach(key => {
+        schema.properties[key] = convertToSchema(param.properties[key]);
+      });
+    } else if (param.type === 'array') {
+      schema.items = param.item_type === 'object' 
+        ? convertToSchema({ 
+            type: 'object', 
+            properties: param.properties, 
+            required_fields: param.required_fields 
+          })
+        : { type: param.item_type || 'string' };
+    }
+
+    return schema;
+  };
+
+  // Build final root object
+  const rootSchema: any = {
+    type: 'object',
+    properties: {},
+    required: []
+  };
+
+  rootParams.forEach(p => {
+    rootSchema.properties[p.name] = convertToSchema(p);
+    if (p.required) {
+      rootSchema.required.push(p.name);
+    }
+  });
+
+  return rootSchema;
+}
+
 export async function getAgentConfig(slug: string): Promise<any> {
   const result = await pool.query(
     `SELECT a.*, 
@@ -14,18 +86,10 @@ export async function getAgentConfig(slug: string): Promise<any> {
           'capability_type', ac.capability_type,
           'name', COALESCE(t.name, mcp.name, kb.name, kg.name, ac.capability_id),
           'description', COALESCE(t.description, mcp.description, kb.description, kg.description, ''),
-          'input_schema', COALESCE(mcp.input_schema, (
-            SELECT jsonb_build_object(
-              'type', 'object',
-              'properties', COALESCE(jsonb_object_agg(tp.name, jsonb_strip_nulls(jsonb_build_object(
-                'type', tp.type, 
-                'description', tp.description,
-                'items', CASE WHEN tp.type = 'array' THEN jsonb_build_object('type', COALESCE(tp.item_type, 'string')) ELSE NULL END
-              ))), '{}'::jsonb),
-              'required', COALESCE((SELECT json_agg(tp2.name) FROM tool_parameters tp2 WHERE tp2.tool_id = t.id AND tp2.required = true), '[]'::json)
-            )
-            FROM tool_parameters tp WHERE tp.tool_id = t.id
-          ), '{}'::jsonb),
+          'input_schema_raw', (
+            SELECT json_agg(tp.*) FROM tool_parameters tp WHERE tp.tool_id = t.id
+          ),
+          'mcp_input_schema', mcp.input_schema,
           'base_url', t.base_url,
           'path', t.path,
           'method', t.method,
@@ -53,7 +117,23 @@ export async function getAgentConfig(slug: string): Promise<any> {
     });
   }
 
-  return result.rows[0];
+  const agent = result.rows[0];
+  
+  // Post-process capabilities to build proper schemas
+  if (agent.capabilities) {
+    agent.capabilities = agent.capabilities.map((cap: any) => {
+      if (cap.capability_type === 'tool' && cap.input_schema_raw) {
+        cap.input_schema = buildToolSchema(cap.input_schema_raw);
+      } else if (cap.capability_type === 'mcp' && cap.mcp_input_schema) {
+        cap.input_schema = cap.mcp_input_schema;
+      } else {
+        cap.input_schema = cap.input_schema || { type: 'object', properties: {}, required: [] };
+      }
+      return cap;
+    });
+  }
+
+  return agent;
 }
 
 export async function callLLM(input: {
@@ -87,13 +167,36 @@ export async function callLLM(input: {
       }
     });
 
-    return response.data;
+    const data = response.data;
+    const costHeader = response.headers['x-litellm-response-cost'] || response.headers['x-litellm-cost'];
+
+    // If usage exists in response, ensure we inject the cost from the header
+    if (data.usage) {
+        data.usage.total_cost = data.usage.total_cost || (costHeader ? parseFloat(costHeader) : 0);
+    }
+
+    return data;
   } catch (error: any) {
-    console.error('LLM Call failed:', error.response?.data || error.message);
+    const status = error.response?.status;
+    const errorMessage = error.response?.data?.error?.message || error.response?.data?.message || error.message;
+    console.error(`LLM Call failed [Status ${status}]:`, errorMessage);
+
+    // Differentiate between retryable (5xx, 429, Network) and non-retryable (400, 401, 403, 404)
+    const isNonRetryable = status && status >= 400 && status < 500 && status !== 429;
+
     throw ApplicationFailure.create({
-      message: `LLM Call failed: ${error.response?.data?.error?.message || error.message}`,
-      type: 'LLMError'
+      message: `LLM Call failed: ${errorMessage}`,
+      type: 'LLMError',
+      nonRetryable: isNonRetryable
     });
+  }
+}
+
+export async function recordUsage(usage: any): Promise<void> {
+  try {
+    await axios.post(`${ENV.PLATFORM_SERVICE_URL}/backend/api/platform/usage`, usage);
+  } catch (error: any) {
+    console.error('Failed to record usage in platform-service:', error.response?.data || error.message);
   }
 }
 
@@ -225,11 +328,6 @@ export async function buildSystemPrompt(input: {
     const roles = input.userRoles || [];
     const agentSlug = agent.slug;
 
-    // Prioritized Search:
-    // 1. Specific Agent Targeting (by Slug)
-    // 2. Specific User Targeting (by ID)
-    // 3. Role Targeting
-    // 4. Global Active Prompt
     const promptResult = await pool.query(
       `SELECT p.content, p.prompt_text 
        FROM prompts p
@@ -252,12 +350,10 @@ export async function buildSystemPrompt(input: {
 
     if (promptResult.rows.length > 0) {
       template = promptResult.rows[0].prompt_text || promptResult.rows[0].content;
-      // If we used content, ensure we strip frontmatter
       if (!promptResult.rows[0].prompt_text) {
           template = template.replace(/^---[\s\S]*?---\n*/, '');
       }
     } else {
-      // Fallback to local file if no active prompt in DB yet
       const templatePath = path.join(__dirname, '../prompts/agent_system.prompt');
       template = await fs.readFile(templatePath, 'utf8');
       template = template.replace(/^---[\s\S]*?---\n*/, '');

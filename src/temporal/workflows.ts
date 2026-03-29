@@ -7,15 +7,25 @@ import {
 } from '@temporalio/workflow';
 import type * as activities from './activities';
 
+const { callLLM } = proxyActivities<typeof activities>({
+  startToCloseTimeout: '2m',
+  retry: {
+    maximumAttempts: 3,
+    initialInterval: '1s',
+    backoffCoefficient: 2,
+    maximumInterval: '30s',
+  }
+});
+
 const { 
   getAgentConfig, 
   buildSystemPrompt, 
-  callLLM, 
   callStandardTool, 
   callMCPTool,
   queryKnowledgeBase,
   queryKnowledgeGraph,
-  summarizeContent
+  summarizeContent,
+  recordUsage
 } = proxyActivities<typeof activities>({
   startToCloseTimeout: '2m',
 });
@@ -35,8 +45,11 @@ export interface SimulatedAgentInput {
   traceId?: string;
   userId?: string;
   userRoles?: string[];
+  apiKey?: string; // Track the API Key used (hash/raw)
+  apiKeyId?: string; // Explicit ID for DB tracking
   maxIterations?: number;
   maxToolOutputTokens?: number;
+  maxToolOutputChars?: number;
   maxContextTokens?: number;
 }
 
@@ -96,8 +109,11 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
   let isPaused = false;
   let isCancelled = false;
   let totalUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+  let totalCost = 0;
+  const llmUsageHistory: any[] = [];
 
   const history = [...(input.messages || [])];
+  const initialUserMessage = history.length > 0 ? history[history.length - 1] : null;
 
   // Thresholds with defaults
   const maxIterations = input.maxIterations || 10;
@@ -142,14 +158,14 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
     return false;
   };
 
-  // 1. Get Agent Config
-  emitEvent('info', { status: 'fetching_config' });
   try {
+    // 1. Get Agent Config
+    emitEvent('info', { status: 'fetching_config' });
     const agentConfig = await getAgentConfig(input.slug);
     emitEvent('info', { 
       status: 'config_fetched', 
       name: agentConfig.name,
-      capabilities: agentConfig.capabilities.map((c: any) => ({ 
+      capabilities: (agentConfig.capabilities || []).map((c: any) => ({ 
         name: c.name, 
         type: c.capability_type, 
         server: c.server_name || 'NULL',
@@ -159,17 +175,25 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
 
     // 2. Build System Prompt
     const userLastPrompt = history[history.length - 1]?.content || '';
-    const finalSystemPrompt = await buildSystemPrompt({ 
+    const finalSystemPrompt = (await buildSystemPrompt({ 
       slug: input.slug, 
       userPrompt: userLastPrompt,
       userId: input.userId,
       userRoles: input.userRoles
-    });
+    })) + '\n\nIMPORTANT: Do not include ANY internal thinking process, monologue, or <thinking> tags in your output. Provide ONLY the final response or tool calls directly.';
     emitEvent('info', { status: 'system_prompt_built' });
 
     // 3. Execution Loop
     let turn = 1;
+    let finalAssistantResponse = null;
     
+    // --- ENSURE FIRST MESSAGE ---
+    // Some providers (Nvidia NIM, Llama) fail if tools are provided without a first user message
+    if (history.length === 0) {
+      history.push({ role: 'user', content: 'Hello' });
+      emitEvent('info', { status: 'injected_starter_message' });
+    }
+
     while (turn <= maxIterations) {
       if (await checkPauseAndCancel(`Turn ${turn}`)) return { status: 'cancelled' };
 
@@ -177,7 +201,6 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
       const totalHistoryLength = JSON.stringify(history).length;
       if (totalHistoryLength > maxContextChars) {
          emitEvent('info', { status: 'summarizing_history', current_length: totalHistoryLength });
-         // Summarize older turns if history gets too long
          for (let i = 0; i < history.length - 1; i++) {
             if (history[i].content && history[i].content.length > 2000 && history[i].role !== 'system') {
                history[i].content = await summarizeContent({ 
@@ -189,75 +212,69 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
          }
       }
 
-      emitEvent('info', { status: 'thinking', turn });
+      // Turn-based info is fine but no separate thinking event
+      emitEvent('info', { status: 'executing_turn', turn });
       
-      const llmResponse = await callLLM({
+      const payload: any = {
         model: agentConfig.model_name,
         systemPrompt: finalSystemPrompt,
         messages: history,
         temperature: agentConfig.temperature,
         maxTokens: agentConfig.max_tokens,
-        tools: agentConfig.capabilities
-          .filter((c: any) => ['tool', 'mcp', 'kb', 'kg'].includes(c.capability_type))
-          .map((c: any) => {
-            let schema = JSON.parse(JSON.stringify(c.input_schema || { type: 'object', properties: {}, required: [] }));
-            
-            // For KB/KG, ensure a query parameter exists if not defined
-            if ((c.capability_type === 'kb' || c.capability_type === 'kg') && (!schema.properties || !schema.properties.query)) {
-              schema.properties = schema.properties || {};
-              schema.properties.query = { type: 'string', description: `Semantic search query for ${c.name}` };
-              schema.required = schema.required || [];
-              if (!schema.required.includes('query')) schema.required.push('query');
-            }
+      };
 
-            // Always provide capability_type to LLM for observability and disambiguation
+      const agentTools = (agentConfig.capabilities || [])
+        .filter((c: any) => ['tool', 'mcp', 'kb', 'kg'].includes(c.capability_type))
+        .map((c: any) => {
+          let schema = JSON.parse(JSON.stringify(c.input_schema || { type: 'object', properties: {}, required: [] }));
+          if ((c.capability_type === 'kb' || c.capability_type === 'kg') && (!schema.properties || !schema.properties.query)) {
             schema.properties = schema.properties || {};
-            schema.properties.capability_type = { 
-              type: 'string', 
-              enum: [c.capability_type], 
-              description: `The type of this capability: ${c.capability_type}`
-            };
+            schema.properties.query = { type: 'string', description: `Semantic search query for ${c.name}` };
             schema.required = schema.required || [];
-            if (!schema.required.includes('capability_type')) schema.required.push('capability_type');
-            
-            return {
-              type: 'function',
-              function: {
-                name: c.name.replace(/\s+/g, '_'),
-                description: c.description,
-                parameters: fixSchema(schema)
-              }
-            };
-          })
-      });
+            if (!schema.required.includes('query')) schema.required.push('query');
+          }
+          schema.properties = schema.properties || {};
+          schema.properties.capability_type = { type: 'string', enum: [c.capability_type], description: `Type: ${c.capability_type}` };
+          schema.required = schema.required || [];
+          if (!schema.required.includes('capability_type')) schema.required.push('capability_type');
+          return { type: 'function', function: { name: c.name.replace(/\s+/g, '_'), description: c.description, parameters: fixSchema(schema) }};
+        });
 
+      if (agentTools.length > 0) {
+        payload.tools = agentTools;
+      }
+
+      const llmResponse = await callLLM(payload);
       const assistantMessage = llmResponse.choices[0].message;
       const content = assistantMessage.content || '';
       
-      // Accumulate tokens
+      // Track detailed usage for platform reporting
       if (llmResponse.usage) {
         totalUsage.prompt_tokens += llmResponse.usage.prompt_tokens;
         totalUsage.completion_tokens += llmResponse.usage.completion_tokens;
         totalUsage.total_tokens += llmResponse.usage.total_tokens;
+        const currentCost = llmResponse.usage.total_cost || 0;
+        totalCost += currentCost;
+
+        // Store each LLM call
+        llmUsageHistory.push({
+            request: payload,
+            response: llmResponse,
+            tokens: llmResponse.usage,
+            cost: currentCost,
+            timestamp: new Date().toISOString()
+        });
       }
 
-      // Extract thinking
-      const { thinking, remainingText } = extractThinking(content);
-      if (thinking) {
-        emitEvent('thinking', { content: thinking });
-        // Send thinking as tokens so it's visible in the UI chat bubbles
-        emitEvent('token', { delta: `> ${thinking}\n\n` });
-      }
+      // No separate extraction or emission of thinking events. 
+      // Everything in 'content' will be handled by the refined cleaner below to avoid duplicates.
 
-      // Check for tool calls (Native OR Regex Fallback)
       let toolCalls = parseToolCalls(assistantMessage);
       let toolCallStrings: string[] = [];
 
-      // FALLBACK: If no native tool calls, search for JSON patterns in the content
       if (toolCalls.length === 0) {
         let jsonCandidate = '';
         let matchedRange: [number, number] | null = null;
-        
         const markdownMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
         if (markdownMatch) {
           jsonCandidate = markdownMatch[1].trim();
@@ -269,60 +286,30 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
             let lastBrace = -1;
             for (let i = firstBrace; i < content.length; i++) {
               if (content[i] === '{') depth++;
-              else if (content[i] === '}') {
-                depth--;
-                if (depth === 0) {
-                  lastBrace = i;
-                  break;
-                }
-              }
+              else if (content[i] === '}') { depth--; if (depth === 0) { lastBrace = i; break; } }
             }
-            if (lastBrace !== -1) {
-              jsonCandidate = content.substring(firstBrace, lastBrace + 1);
-              matchedRange = [firstBrace, lastBrace + 1];
-            }
+            if (lastBrace !== -1) { jsonCandidate = content.substring(firstBrace, lastBrace + 1); matchedRange = [firstBrace, lastBrace + 1]; }
           }
         }
-
         if (jsonCandidate) {
           try {
             const parsed = JSON.parse(jsonCandidate);
             const toolName = parsed.name || (parsed.function && parsed.function.name) || (parsed.call && parsed.call.name);
             let toolArgs = parsed.parameters || parsed.arguments || (parsed.function && parsed.function.arguments) || parsed.args;
-
             if (toolName) {
-              toolCalls = [{
-                id: `call_parsed_${Date.now()}`,
-                type: 'function',
-                function: {
-                  name: toolName,
-                  arguments: typeof toolArgs === 'object' ? JSON.stringify(toolArgs) : (toolArgs || '{}')
-                }
-              }];
-              if (matchedRange) {
-                 toolCallStrings.push(content.substring(matchedRange[0], matchedRange[1]));
-              }
+              toolCalls = [{ id: `call_parsed_${Date.now()}`, type: 'function', function: { name: toolName, arguments: typeof toolArgs === 'object' ? JSON.stringify(toolArgs) : (toolArgs || '{}') } }];
+              if (matchedRange) toolCallStrings.push(content.substring(matchedRange[0], matchedRange[1]));
               emitEvent('info', { status: 'fallback_tool_detected', name: toolName });
             }
-          } catch (e) {
-            emitEvent('info', { status: 'json_parse_failed', error: (e as Error).message });
-          }
+          } catch (e) { /* silent fail */ }
         }
       }
 
-      // Clean response text
       let cleanText = content.replace(/<thinking>[\s\S]*?<\/thinking>/, '');
-      toolCallStrings.forEach(s => {
-        cleanText = cleanText.replace(s, '');
-      });
-      
+      toolCallStrings.forEach(s => { cleanText = cleanText.replace(s, ''); });
       const trimmedCleanText = cleanText.trim();
-      const isJustFiller = toolCalls.length > 0 && 
-        (trimmedCleanText.length < 100 && (trimmedCleanText.endsWith(':') || trimmedCleanText.startsWith('Here')));
-
-      if (trimmedCleanText && !isJustFiller) {
-        emitEvent('token', { delta: trimmedCleanText });
-      }
+      const isJustFiller = toolCalls.length > 0 && (trimmedCleanText.length < 100 && (trimmedCleanText.endsWith(':') || trimmedCleanText.startsWith('Here')));
+      if (trimmedCleanText && !isJustFiller) emitEvent('token', { delta: trimmedCleanText });
       
       if (toolCalls.length > 0) {
         emitEvent('info', { status: 'executing_tools', count: toolCalls.length });
@@ -332,80 +319,61 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
           const rawName = tc.function.name;
           const args = tc.function.arguments;
           const parsedArgs = typeof args === 'string' ? JSON.parse(args) : args;
-          
           const normalizedCalledName = decodeURIComponent(rawName).toLowerCase().replace(/[\s_-]/g, '');
-          
           const capability = agentConfig.capabilities.find((c: any) => {
              const normalizedCapName = c.name.toLowerCase().replace(/[\s_-]/g, '');
              return normalizedCapName === normalizedCalledName || c.name === rawName;
           });
-          
           const name = capability ? capability.name : rawName;
           emitEvent('tool_call', { name, arguments: parsedArgs, call_id: tc.id });
           
           let result: any;
-          
-          if (!capability) {
-             emitEvent('info', { status: 'capability_not_found', tool: rawName });
-          }
-
           switch (capability?.capability_type) {
-            case 'tool':
-              result = await callStandardTool({ toolName: name, arguments: parsedArgs, userId: agentConfig.user_id });
-              break;
-            case 'mcp':
-              result = await callMCPTool({ 
-                serverName: capability.server_name || capability.server_id || 'unknown', 
-                toolName: name, 
-                arguments: parsedArgs,
-                userId: agentConfig.user_id
-              });
-              break;
-            case 'kb':
-              result = await queryKnowledgeBase({ kbId: capability.id, query: parsedArgs.query || cleanText || 'General information', userId: agentConfig.user_id });
-              break;
-            case 'kg':
-              result = await queryKnowledgeGraph({ kgId: capability.id, query: parsedArgs.query || cleanText || 'General information', userId: agentConfig.user_id });
-              break;
-            default:
-              result = { error: `Tool ${name} not recognized as a capability.` };
+            case 'tool': result = await callStandardTool({ toolName: name, arguments: parsedArgs, userId: agentConfig.user_id }); break;
+            case 'mcp': result = await callMCPTool({ serverName: capability.server_name || capability.server_id || 'unknown', toolName: name, arguments: parsedArgs, userId: agentConfig.user_id }); break;
+            case 'kb': result = await queryKnowledgeBase({ kbId: capability.id, query: parsedArgs.query || cleanText || 'General information', userId: agentConfig.user_id }); break;
+            case 'kg': result = await queryKnowledgeGraph({ kgId: capability.id, query: parsedArgs.query || cleanText || 'General information', userId: agentConfig.user_id }); break;
+            default: result = { error: `Tool ${name} not recognized.` };
           }
 
           let toolContent = typeof result === 'string' ? result : JSON.stringify(result);
           if (toolContent.length > maxToolOutputChars) {
-            emitEvent('info', { status: 'summarizing_tool_output', tool: name, original_length: toolContent.length });
-            toolContent = await summarizeContent({ 
-              content: toolContent, 
-              model: agentConfig.model_name,
-              instruction: `Summarize the output of the ${name} tool. Focus on the data requested: ${JSON.stringify(parsedArgs)}`
-            });
+            toolContent = await summarizeContent({ content: toolContent, model: agentConfig.model_name, instruction: `Summarize output of and focus on: ${JSON.stringify(parsedArgs)}` });
           }
           emitEvent('tool_result', { name, result: toolContent, call_id: tc.id });
-          
-          return {
-            role: 'tool',
-            tool_call_id: tc.id,
-            name: name,
-            content: toolContent
-          };
+          return { role: 'tool', tool_call_id: tc.id, name: name, content: toolContent };
         }));
-
         history.push(...toolResults);
       } else {
-        emitEvent('info', { status: 'no_tools_detected_finishing' });
+        finalAssistantResponse = content;
+        emitEvent('info', { status: 'finishing' });
         break;
       }
-
       turn++;
     }
 
-    emitEvent('end', {
-      status: 'success',
-      usage: totalUsage
+    emitEvent('end', { status: 'success', usage: totalUsage });
+
+    // RECORD USAGE IN PLATFORM SERVICE
+    // This happens asynchronously to avoid delaying the final response
+    await recordUsage({
+        execution_id: input.traceId, // We use traceId as the primary identifier for tracking
+        agent_id: input.slug,
+        api_key: input.apiKeyId || input.apiKey, // Prioritize ID for tracking, fallback to hash/raw
+        user_id: input.userId,
+        total_input_tokens: totalUsage.prompt_tokens,
+        total_completion_tokens: totalUsage.completion_tokens,
+        total_tokens: totalUsage.total_tokens,
+        total_cost: totalCost,
+        initial_request: initialUserMessage,
+        final_response: finalAssistantResponse || 'No content returned',
+        llm_calls: llmUsageHistory
     });
+
     return { status: 'completed', usage: totalUsage };
 
   } catch (error: any) {
+    status = 'FAILED';
     emitEvent('Error', { message: error.message || 'Workflow internal error' });
     throw error;
   } finally {

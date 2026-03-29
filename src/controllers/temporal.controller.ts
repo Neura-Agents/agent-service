@@ -3,6 +3,7 @@ import { getTemporalClient } from '../temporal/client';
 import { getEventsQuery, isCompletedQuery, pauseSignal, resumeSignal, cancelSignal } from '../temporal/workflows';
 import { WorkflowHandle, WorkflowNotFoundError } from '@temporalio/client';
 import { v4 as uuidv4 } from 'uuid';
+import { AuthenticatedRequest } from '../middlewares/auth.middleware';
 
 
 export const pauseTemporalWorkflow = async (req: Request, res: Response) => {
@@ -64,9 +65,143 @@ export const terminateTemporalWorkflow = async (req: Request, res: Response) => 
  * data:{json_string}\n    (NO space after data:)
  * \n
  */
-function sendSSEEvent(res: Response, type: string, data: any) {
-  res.write(`event:  ${type}\n`);
-  res.write(`data:${JSON.stringify(data)}\n\n`);
+/**
+ * Mappers to transform internal events to a2a-compliant events
+ */
+function mapToA2AEvent(type: string, data: any, contextId: string, taskId: string, final: boolean = false) {
+  // Whitelist essential types for A2A and the requested SSE events
+  const essentialTypes = ['start', 'token', 'tool_call', 'tool_result', 'error', 'Error', 'end'];
+  if (!essentialTypes.includes(type)) return null;
+
+  // Use camelCase to match a2a library's alias_generator (defined in _base.py)
+  const baseEvent = {
+    contextId: contextId,
+    taskId: taskId,
+    final: final || type.toLowerCase() === 'end',
+    metadata: {
+      internalType: type,
+      ...(typeof data === 'object' ? data : { value: data })
+    }
+  };
+
+  const generateMessageId = () => `msg-${taskId}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+  switch (type.toLowerCase()) {
+    case 'start':
+      return {
+        ...baseEvent,
+        kind: 'task',
+        id: taskId,
+        status: { state: 'working' }
+      };
+    case 'token':
+      let text = typeof data === 'string' ? data : (data.delta || JSON.stringify(data));
+      let parts: any[] = [];
+
+      // Try to detect if the text is itself a JSON-encoded A2A part or message
+      try {
+        if (text.trim().startsWith('{')) {
+          const parsed = JSON.parse(text);
+          if (parsed.parts && Array.isArray(parsed.parts)) {
+            // It's a full A2A message object
+            parts = parsed.parts;
+          } else if (parsed.kind === 'text' || parsed.type === 'text') {
+            // It's a single A2A text part
+            parts = [{ kind: 'text', text: parsed.text || parsed.content || text }];
+          } else if (parsed.text || parsed.content) {
+            // It's a generic object with text/content
+            parts = [{ kind: 'text', text: parsed.text || parsed.content }];
+          } else {
+            // Fallback to raw text
+            parts = [{ kind: 'text', text }];
+          }
+        } else {
+          parts = [{ kind: 'text', text }];
+        }
+      } catch (e) {
+        // Not JSON, use as raw text
+        parts = [{ kind: 'text', text }];
+      }
+
+      return {
+        ...baseEvent,
+        kind: 'status-update',
+        status: {
+          state: 'working',
+          message: {
+            role: 'agent',
+            messageId: generateMessageId(),
+            parts: parts
+          }
+        }
+      };
+    case 'tool_call':
+      return {
+        ...baseEvent,
+        kind: 'status-update',
+        status: {
+          state: 'working',
+            message: { 
+                role: 'agent', 
+                messageId: generateMessageId(),
+                parts: [{ kind: 'text', text: `[Calling Tool: ${data.name}]` }]
+            }
+        }
+      };
+    case 'tool_result':
+      return {
+        ...baseEvent,
+        kind: 'status-update',
+        status: {
+          state: 'working',
+            message: { 
+                role: 'agent', 
+                messageId: generateMessageId(),
+                parts: [{ kind: 'text', text: `[Tool Result: ${data.result}]` }]
+            }
+        }
+      };
+    case 'error':
+      return {
+        ...baseEvent,
+        kind: 'status-update',
+        status: {
+            state: 'failed',
+            message: { 
+                role: 'agent', 
+                messageId: generateMessageId(),
+                parts: [{ kind: 'text', text: data.message || 'Workflow internal error' }] 
+            }
+        }
+      };
+    case 'end':
+        return {
+          ...baseEvent,
+          kind: 'status-update',
+          final: true,
+          status: { state: 'completed' }
+        };
+    default:
+      return null;
+  }
+}
+
+function sendSSEEvent(res: Response, type: string, data: any, id: string | number | null = null, contextId?: string, taskId?: string) {
+  // Create a2a-compliant payload if IDs are present
+  const a2aPayload = (contextId && taskId) 
+    ? mapToA2AEvent(type, data, contextId, taskId, type.toLowerCase() === 'end')
+    : data;
+
+  // Filter out non-essential events based on a2a mapping (null means skip)
+  if (contextId && taskId && a2aPayload === null) return;
+
+  const isError = type.toLowerCase() === 'error';
+  const payload = isError 
+    ? { jsonrpc: '2.0', error: a2aPayload, id: id }
+    : { jsonrpc: '2.0', result: a2aPayload, id: id };
+
+  res.write(`event: ${type}\n`);
+  res.write(`data: ${JSON.stringify(payload)}\n\n`);
 }
 
 // Helper to send heartbeat exactly as requested
@@ -82,7 +217,10 @@ async function pollAndStreamEvents(
   res: Response,
   handle: WorkflowHandle,
   lastEventCount: number,
-  isSubscription: boolean = false
+  isSubscription: boolean = false,
+  requestId: string | number | null = null,
+  contextId?: string,
+  taskId?: string
 ) {
   let currentLastEventCount = lastEventCount;
   let heartBeatTick = 0;
@@ -103,7 +241,7 @@ async function pollAndStreamEvents(
       if (allEvents && allEvents.length > currentLastEventCount) {
         for (let i = currentLastEventCount; i < allEvents.length; i++) {
           const event = allEvents[i];
-          sendSSEEvent(res, event.type, event.data);
+          sendSSEEvent(res, event.type, event.data, requestId, contextId, taskId);
         }
         currentLastEventCount = allEvents.length;
       }
@@ -118,7 +256,7 @@ async function pollAndStreamEvents(
         if (finalEvents && finalEvents.length > currentLastEventCount) {
           for (let i = currentLastEventCount; i < finalEvents.length; i++) {
             const event = finalEvents[i];
-            sendSSEEvent(res, event.type, event.data);
+            sendSSEEvent(res, event.type, event.data, requestId, contextId, taskId);
           }
         }
 
@@ -129,6 +267,7 @@ async function pollAndStreamEvents(
       }
     } catch (error) {
       console.error('Error polling workflow events:', error);
+      sendSSEEvent(res, 'Error', { message: 'Workflow interaction failed' }, requestId, contextId, taskId);
       // If workflow is not found, it might have been archived or finished
       clearInterval(pollInterval);
       res.end();
@@ -141,14 +280,35 @@ async function pollAndStreamEvents(
   });
 }
 
-import { AuthenticatedRequest } from '../middlewares/auth.middleware';
+
 
 export const triggerTemporalWorkflow = async (req: Request, res: Response) => {
   const { slug } = req.params;
-  const { messages } = req.body;
+  const { messages, id: requestId, params, message: topLevelMessage } = req.body;
   const authReq = req as AuthenticatedRequest;
   const userId = authReq.user?.id || 'system';
   const userRoles = authReq.user?.roles || [];
+
+  // Normalize input messages from both internal and a2a formats
+  let workflowMessages = messages || [];
+  
+  // Try to find an a2a message in req.body.message or req.body.params.message
+  const a2aMessage = topLevelMessage || params?.message;
+  
+  if (a2aMessage && a2aMessage.parts) {
+    const textContent = a2aMessage.parts
+      .filter((p: any) => (p.kind === 'text' || p.type === 'text') && p.text)
+      .map((p: any) => p.text)
+      .join('\n');
+    
+    workflowMessages = [
+      ...workflowMessages,
+      { 
+        role: a2aMessage.role || 'user', 
+        content: textContent || '' 
+      }
+    ];
+  }
   
   const workflowId = `agent-simulation-${slug}-${uuidv4()}`;
 
@@ -164,17 +324,19 @@ export const triggerTemporalWorkflow = async (req: Request, res: Response) => {
     agent_id: slug, 
     trace_id: traceId,
     workflow_id: workflowId,
-  });
+  }, requestId, traceId, workflowId);
 
   try {
     const client = await getTemporalClient();
     const handle = await client.workflow.start('SimulatedAgentWorkflow', {
       args: [{
         slug: slug,
-        messages: messages || [],
+        messages: workflowMessages,
         traceId: traceId,
         userId: userId,
         userRoles: userRoles,
+        apiKey: authReq.user?.apiKey,
+        apiKeyId: authReq.user?.apiKeyId,
         maxIterations: parseInt(process.env.AGENT_MAX_ITERATIONS || '10'),
         maxToolOutputTokens: parseInt(process.env.AGENT_MAX_TOOL_OUTPUT_TOKENS || '10000'),
         maxContextTokens: parseInt(process.env.AGENT_MAX_CONTEXT_TOKENS || '50000')
@@ -184,11 +346,11 @@ export const triggerTemporalWorkflow = async (req: Request, res: Response) => {
     });
 
     // Start poll loop
-    await pollAndStreamEvents(res, handle, 0);
+    await pollAndStreamEvents(res, handle, 0, false, requestId, traceId, workflowId);
 
   } catch (error) {
     console.error('Error triggering workflow:', error);
-    sendSSEEvent(res, 'Error', { message: 'Failed to start workflow' });
+    sendSSEEvent(res, 'Error', { message: 'Failed to start workflow' }, requestId, traceId, workflowId);
     res.end();
   }
 };
@@ -219,10 +381,10 @@ export const subscribeTemporalWorkflow = async (req: Request, res: Response) => 
     }
 
     // Emit WorkflowStarted { reconnected: true }
-    sendSSEEvent(res, 'WorkflowStarted', { reconnected: true, workflowId });
+    sendSSEEvent(res, 'WorkflowStarted', { reconnected: true, workflowId }, null, undefined, workflowId as string);
 
     // Start poll loop with last_event_count = 0 to replay history
-    await pollAndStreamEvents(res, handle, 0, true);
+    await pollAndStreamEvents(res, handle, 0, true, null, undefined, workflowId as string);
 
   } catch (error) {
     console.error('Error subscribing to workflow:', error);
