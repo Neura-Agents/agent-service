@@ -16,10 +16,10 @@ app.use(express.json());
 
 // Log requests
 app.use((req, res, next) => {
-    logger.info({ 
-        method: req.method, 
+    logger.info({
+        method: req.method,
         url: req.url,
-        ip: req.ip 
+        ip: req.ip
     }, 'Incoming Request');
     next();
 });
@@ -46,7 +46,7 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 const start = async () => {
     try {
         await initDb();
-        
+
         app.listen(ENV.PORT, () => {
             logger.info(`Agent service listening on port ${ENV.PORT} in ${ENV.NODE_ENV} mode`);
         });
