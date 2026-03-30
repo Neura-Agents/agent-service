@@ -4,6 +4,8 @@ import { getEventsQuery, isCompletedQuery, pauseSignal, resumeSignal, cancelSign
 import { WorkflowHandle, WorkflowNotFoundError } from '@temporalio/client';
 import { v4 as uuidv4 } from 'uuid';
 import { AuthenticatedRequest } from '../middlewares/auth.middleware';
+import axios from 'axios';
+import { ENV } from '../config/env.config';
 
 
 export const pauseTemporalWorkflow = async (req: Request, res: Response) => {
@@ -55,6 +57,38 @@ export const terminateTemporalWorkflow = async (req: Request, res: Response) => 
   } catch (error) {
     console.error('Error terminating workflow:', error);
     res.status(500).json({ error: 'Failed to terminate workflow' });
+  }
+};
+
+/**
+ * Helper to check user balance before starting resource-heavy operations
+ */
+const checkUserBalance = async (userId: string): Promise<{ authorized: boolean; balance?: number; error?: string }> => {
+  try {
+    const response = await axios.get(`${ENV.BILLING_SERVICE_URL}/backend/api/billing/balance`, {
+      params: { userId },
+      headers: {
+        'x-internal-key': ENV.INTERNAL_SERVICE_SECRET
+      }
+    });
+
+    const balance = response.data.balance || 0;
+    const MINIMUM_BALANCE = 0.01; // Minimum to start a workflow
+
+    if (balance < MINIMUM_BALANCE) {
+      return { 
+        authorized: false, 
+        balance, 
+        error: `Insufficient balance: $${balance.toFixed(4)}. Minimum $${MINIMUM_BALANCE} required to start.` 
+      };
+    }
+
+    return { authorized: true, balance };
+  } catch (error: any) {
+    console.error('Balance check failed:', error.message);
+    // If billing service is down, we might want to fail-safe or fail-closed.
+    // For now, fail-closed to prevent unpaid usage.
+    return { authorized: false, error: 'Credit verification service is currently unavailable.' };
   }
 };
 
@@ -312,7 +346,17 @@ export const triggerTemporalWorkflow = async (req: Request, res: Response) => {
   
   const workflowId = `agent-simulation-${slug}-${uuidv4()}`;
 
-  // Set headers for SSE
+  // PRE-CHECK: Check user balance before starting SSE and Workflow
+  const balanceCheck = await checkUserBalance(userId);
+  if (!balanceCheck.authorized) {
+    return res.status(402).json({ 
+      error: 'Insufficient Balance', 
+      message: balanceCheck.error,
+      balance: balanceCheck.balance
+    });
+  }
+
+  // Set headers for SSE (Wait to do this until AFTER logic that might need to return JSON)
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');

@@ -25,7 +25,8 @@ const {
   queryKnowledgeBase,
   queryKnowledgeGraph,
   summarizeContent,
-  recordUsage
+  recordUsage,
+  checkBalance
 } = proxyActivities<typeof activities>({
   startToCloseTimeout: '2m',
 });
@@ -162,6 +163,12 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
     // 1. Get Agent Config
     emitEvent('info', { status: 'fetching_config' });
     const agentConfig = await getAgentConfig(input.slug);
+    
+    // 1.5 Check Credits Balance
+    if (input.userId) {
+        await checkBalance(input.userId);
+    }
+    
     emitEvent('info', { 
       status: 'config_fetched', 
       name: agentConfig.name,
@@ -408,7 +415,17 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
 
   } catch (error: any) {
     status = 'FAILED';
-    emitEvent('Error', { message: error.message || 'Workflow internal error' });
+    console.error('Workflow execution error:', error);
+    
+    // Extract the most specific error message from Temporal failures
+    let errorMessage = error.message || 'Workflow internal error';
+    if (error.cause && error.cause.message) {
+        errorMessage = error.cause.message;
+    } else if (error.details && error.details[0]) {
+        errorMessage = error.details[0];
+    }
+
+    emitEvent('Error', { message: errorMessage });
     throw error;
   } finally {
     completed = true;

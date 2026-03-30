@@ -194,9 +194,56 @@ export async function callLLM(input: {
 
 export async function recordUsage(usage: any): Promise<void> {
   try {
-    await axios.post(`${ENV.PLATFORM_SERVICE_URL}/backend/api/platform/usage`, usage);
+    await axios.post(`${ENV.PLATFORM_SERVICE_URL}/backend/api/platform/usage`, usage, {
+      headers: {
+        'x-internal-key': ENV.INTERNAL_SERVICE_SECRET
+      }
+    });
   } catch (error: any) {
-    console.error('Failed to record usage in platform-service:', error.response?.data || error.message);
+    const errorData = error.response?.data || error.message;
+    console.error('Failed to record usage in platform-service:', errorData);
+    
+    // If platform-service (via billing-service) returns a termination signal
+    if (error.response?.status === 402 || (typeof errorData === 'string' && errorData.includes('TERMINATE_EXECUTION'))) {
+      throw ApplicationFailure.create({
+        message: 'Insufficient credits to continue execution.',
+        type: 'InsufficientCreditsError',
+        nonRetryable: true
+      });
+    }
+  }
+}
+
+export async function checkBalance(userId: string, minAmount: number = 0.01): Promise<void> {
+  try {
+    const response = await axios.get(`${ENV.BILLING_SERVICE_URL}/backend/api/billing/balance`, {
+      params: { userId },
+      headers: {
+        'x-internal-key': ENV.INTERNAL_SERVICE_SECRET
+      }
+    });
+    
+    const balance = parseFloat(response.data.balance || '0');
+    if (balance < minAmount) {
+      throw ApplicationFailure.create({
+        message: `Insufficient balance: $${balance}. Minimum $${minAmount} required to start.`,
+        type: 'InsufficientCreditsError',
+        nonRetryable: true
+      });
+    }
+  } catch (error: any) {
+    if (error instanceof ApplicationFailure) throw error;
+    
+    console.error('Failed to check balance:', error.response?.data || error.message);
+    // Be permissive if billing service is down, or strict?
+    // User requested robustness, so maybe we log and continue unless it's a 402/403.
+    if (error.response?.status === 402) {
+      throw ApplicationFailure.create({
+        message: 'Insufficient credits.',
+        type: 'InsufficientCreditsError',
+        nonRetryable: true
+      });
+    }
   }
 }
 
