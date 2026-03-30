@@ -1,5 +1,4 @@
 import express from 'express';
-import cors from 'cors';
 import { ENV } from './config/env.config';
 import { initDb } from './config/db.config';
 import logger from './config/logger';
@@ -13,7 +12,6 @@ import { authenticate, tryAuthenticate } from './middlewares/auth.middleware';
 const app = express();
 
 // Middleware
-app.use(cors());
 app.use(express.json());
 
 // Log requests
