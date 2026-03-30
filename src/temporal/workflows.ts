@@ -201,15 +201,29 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
       const totalHistoryLength = JSON.stringify(history).length;
       if (totalHistoryLength > maxContextChars) {
          emitEvent('info', { status: 'summarizing_history', current_length: totalHistoryLength });
-         for (let i = 0; i < history.length - 1; i++) {
-            if (history[i].content && history[i].content.length > 2000 && history[i].role !== 'system') {
-               history[i].content = await summarizeContent({ 
-                 content: history[i].content, 
-                 model: agentConfig.model_name,
-                 instruction: 'Provide a very high-level summary of this step to save space.'
-               });
-            }
-         }
+          for (let i = 0; i < history.length - 1; i++) {
+             if (history[i].content && history[i].content.length > 2000 && history[i].role !== 'system') {
+                const summaryResult = await summarizeContent({ 
+                  content: history[i].content, 
+                  model: agentConfig.model_name,
+                  instruction: 'Provide a very high-level summary of this step to save space.'
+                });
+                history[i].content = summaryResult.content;
+                
+                if (summaryResult.usage) {
+                    totalUsage.prompt_tokens += summaryResult.usage.prompt_tokens || 0;
+                    totalUsage.completion_tokens += summaryResult.usage.completion_tokens || 0;
+                    totalUsage.total_tokens += summaryResult.usage.total_tokens || 0;
+                    totalCost += summaryResult.usage.total_cost || 0;
+                    llmUsageHistory.push({
+                        type: 'summarization_history',
+                        tokens: summaryResult.usage,
+                        cost: summaryResult.usage.total_cost || 0,
+                        timestamp: new Date().toISOString()
+                    });
+                }
+             }
+          }
       }
 
       // Turn-based info is fine but no separate thinking event
@@ -338,7 +352,25 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
 
           let toolContent = typeof result === 'string' ? result : JSON.stringify(result);
           if (toolContent.length > maxToolOutputChars) {
-            toolContent = await summarizeContent({ content: toolContent, model: agentConfig.model_name, instruction: `Summarize output of and focus on: ${JSON.stringify(parsedArgs)}` });
+            const summaryResult = await summarizeContent({ 
+                content: toolContent, 
+                model: agentConfig.model_name, 
+                instruction: `Summarize output of and focus on: ${JSON.stringify(parsedArgs)}` 
+            });
+            toolContent = summaryResult.content;
+            
+            if (summaryResult.usage) {
+                totalUsage.prompt_tokens += summaryResult.usage.prompt_tokens || 0;
+                totalUsage.completion_tokens += summaryResult.usage.completion_tokens || 0;
+                totalUsage.total_tokens += summaryResult.usage.total_tokens || 0;
+                totalCost += summaryResult.usage.total_cost || 0;
+                llmUsageHistory.push({
+                    type: 'summarization_tool',
+                    tokens: summaryResult.usage,
+                    cost: summaryResult.usage.total_cost || 0,
+                    timestamp: new Date().toISOString()
+                });
+            }
           }
           emitEvent('tool_result', { name, result: toolContent, call_id: tc.id });
           return { role: 'tool', tool_call_id: tc.id, name: name, content: toolContent };
@@ -357,9 +389,11 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
     // RECORD USAGE IN PLATFORM SERVICE
     // This happens asynchronously to avoid delaying the final response
     await recordUsage({
-        execution_id: input.traceId, // We use traceId as the primary identifier for tracking
-        agent_id: input.slug,
-        api_key: input.apiKeyId || input.apiKey, // Prioritize ID for tracking, fallback to hash/raw
+        execution_id: input.traceId,
+        resource_id: input.slug,
+        resource_type: 'agent',
+        action_type: 'execution',
+        api_key: input.apiKeyId || input.apiKey,
         user_id: input.userId,
         total_input_tokens: totalUsage.prompt_tokens,
         total_completion_tokens: totalUsage.completion_tokens,

@@ -397,7 +397,7 @@ export async function summarizeContent(input: {
   content: string,
   model: string,
   instruction?: string
-}): Promise<string> {
+}): Promise<{ content: string, usage?: any }> {
   try {
     const response = await axios.post(`${ENV.LITELLM.AI_GATEWAY_URL}/chat/completions`, {
       model: input.model,
@@ -412,9 +412,29 @@ export async function summarizeContent(input: {
         }
       ],
       max_tokens: 1500
+    }, {
+      headers: {
+        'Authorization': `Bearer ${ENV.LITELLM.API_KEY}`,
+        'Content-Type': 'application/json'
+      }
     });
-    return response.data.choices[0].message.content || 'Failed to summarize';
+
+    const data = response.data;
+    const costHeader = response.headers['x-litellm-response-cost'] || response.headers['x-litellm-cost'];
+    
+    let usage = data.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+    if (costHeader) {
+        usage.total_cost = parseFloat(costHeader);
+    }
+
+    return { 
+        content: data.choices[0].message.content || 'Failed to summarize',
+        usage
+    };
   } catch (error: any) {
-    return input.content.substring(0, 5000) + '... (Truncated)';
+    return { 
+        content: input.content.substring(0, 5000) + '... (Truncated)',
+        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, total_cost: 0 }
+    };
   }
 }
