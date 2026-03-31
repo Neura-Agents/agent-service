@@ -19,7 +19,7 @@ export const ENV = {
     INTERNAL_SERVICE_SECRET: process.env.INTERNAL_SERVICE_SECRET || 'super-secret-key',
     LITELLM: {
         API_KEY: process.env.LITELLM_API_KEY || '',
-        AI_GATEWAY_URL: process.env.AI_GATEWAY_URL || 'http://localhost:4000',
+        LITELLM_URL: process.env.LITELLM_URL || 'http://localhost:4000',
     },
     FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:8080',
     TOOLS_SERVICE_URL: process.env.TOOLS_SERVICE_URL || 'http://localhost:3001',
@@ -29,6 +29,6 @@ export const ENV = {
     KEYCLOAK: {
         ISSUER_URL: process.env.KEYCLOAK_ISSUER_URL || 'http://keycloak:8080/realms/neura-agents',
         PUBLIC_ISSUER_URL: process.env.KEYCLOAK_PUBLIC_ISSUER_URL || 'http://localhost:8081/realms/neura-agents',
-        REALM: process.env.VITE_KEYCLOAK_REALM || 'neura-agents'
+        REALM: process.env.KEYCLOAK_REALM || 'neura-agents'
     }
 };

@@ -48,12 +48,12 @@ function buildToolSchema(parameters: any[]): any {
         schema.properties[key] = convertToSchema(param.properties[key]);
       });
     } else if (param.type === 'array') {
-      schema.items = param.item_type === 'object' 
-        ? convertToSchema({ 
-            type: 'object', 
-            properties: param.properties, 
-            required_fields: param.required_fields 
-          })
+      schema.items = param.item_type === 'object'
+        ? convertToSchema({
+          type: 'object',
+          properties: param.properties,
+          required_fields: param.required_fields
+        })
         : { type: param.item_type || 'string' };
     }
 
@@ -118,7 +118,7 @@ export async function getAgentConfig(slug: string): Promise<any> {
   }
 
   const agent = result.rows[0];
-  
+
   // Post-process capabilities to build proper schemas
   if (agent.capabilities) {
     agent.capabilities = agent.capabilities.map((cap: any) => {
@@ -160,7 +160,7 @@ export async function callLLM(input: {
       payload.tool_choice = 'auto';
     }
 
-    const response = await axios.post(`${ENV.LITELLM.AI_GATEWAY_URL}/chat/completions`, payload, {
+    const response = await axios.post(`${ENV.LITELLM.LITELLM_URL}/chat/completions`, payload, {
       headers: {
         'Authorization': `Bearer ${ENV.LITELLM.API_KEY}`,
         'Content-Type': 'application/json'
@@ -172,7 +172,7 @@ export async function callLLM(input: {
 
     // If usage exists in response, ensure we inject the cost from the header
     if (data.usage) {
-        data.usage.total_cost = data.usage.total_cost || (costHeader ? parseFloat(costHeader) : 0);
+      data.usage.total_cost = data.usage.total_cost || (costHeader ? parseFloat(costHeader) : 0);
     }
 
     return data;
@@ -202,7 +202,7 @@ export async function recordUsage(usage: any): Promise<void> {
   } catch (error: any) {
     const errorData = error.response?.data || error.message;
     console.error('Failed to record usage in platform-service:', errorData);
-    
+
     // If platform-service (via billing-service) returns a termination signal
     if (error.response?.status === 402 || (typeof errorData === 'string' && errorData.includes('TERMINATE_EXECUTION'))) {
       throw ApplicationFailure.create({
@@ -222,7 +222,7 @@ export async function checkBalance(userId: string, currentSpent: number = 0, min
         'x-internal-key': ENV.INTERNAL_SERVICE_SECRET
       }
     });
-    
+
     const balance = parseFloat(response.data.balance || '0');
     const effectiveBalance = balance - currentSpent;
 
@@ -235,7 +235,7 @@ export async function checkBalance(userId: string, currentSpent: number = 0, min
     }
   } catch (error: any) {
     if (error instanceof ApplicationFailure) throw error;
-    
+
     console.error('Failed to check balance:', error.response?.data || error.message);
     if (error.response?.status === 402) {
       throw ApplicationFailure.create({
@@ -337,7 +337,7 @@ export async function buildSystemPrompt(input: {
   userRoles?: string[]
 }): Promise<string> {
   const agent = await getAgentConfig(input.slug);
-  
+
   const currentTime = new Date().toLocaleString();
   const workspacePath = process.cwd();
 
@@ -357,7 +357,7 @@ export async function buildSystemPrompt(input: {
 
   const formatTools = (toolList: any[]) => {
     if (toolList.length === 0) return 'None';
-    return toolList.map(t => 
+    return toolList.map(t =>
       `- **${t.name}**: ${t.description}\n  Arguments (schema): ${JSON.stringify(t.input_schema)}`
     ).join('\n');
   };
@@ -398,7 +398,7 @@ export async function buildSystemPrompt(input: {
     if (promptResult.rows.length > 0) {
       template = promptResult.rows[0].prompt_text || promptResult.rows[0].content;
       if (!promptResult.rows[0].prompt_text) {
-          template = template.replace(/^---[\s\S]*?---\n*/, '');
+        template = template.replace(/^---[\s\S]*?---\n*/, '');
       }
     } else {
       const templatePath = path.join(__dirname, '../prompts/agent_system.prompt');
@@ -446,16 +446,16 @@ export async function summarizeContent(input: {
   instruction?: string
 }): Promise<{ content: string, usage?: any }> {
   try {
-    const response = await axios.post(`${ENV.LITELLM.AI_GATEWAY_URL}/chat/completions`, {
+    const response = await axios.post(`${ENV.LITELLM.LITELLM_URL}/chat/completions`, {
       model: input.model,
       messages: [
-        { 
-          role: 'system', 
-          content: 'Keep the summary brief and focus on facts, code or essential data requested. Summarize under 500 characters' 
+        {
+          role: 'system',
+          content: 'Keep the summary brief and focus on facts, code or essential data requested. Summarize under 500 characters'
         },
-        { 
-          role: 'user', 
-          content: `Instruction: ${input.instruction || 'Summarize for a general AI assistant'}\n\nContent:\n${input.content}` 
+        {
+          role: 'user',
+          content: `Instruction: ${input.instruction || 'Summarize for a general AI assistant'}\n\nContent:\n${input.content}`
         }
       ],
       max_tokens: 1500
@@ -468,20 +468,20 @@ export async function summarizeContent(input: {
 
     const data = response.data;
     const costHeader = response.headers['x-litellm-response-cost'] || response.headers['x-litellm-cost'];
-    
+
     let usage = data.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
     if (costHeader) {
-        usage.total_cost = parseFloat(costHeader);
+      usage.total_cost = parseFloat(costHeader);
     }
 
-    return { 
-        content: data.choices[0].message.content || 'Failed to summarize',
-        usage
+    return {
+      content: data.choices[0].message.content || 'Failed to summarize',
+      usage
     };
   } catch (error: any) {
-    return { 
-        content: input.content.substring(0, 5000) + '... (Truncated)',
-        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, total_cost: 0 }
+    return {
+      content: input.content.substring(0, 5000) + '... (Truncated)',
+      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, total_cost: 0 }
     };
   }
 }
