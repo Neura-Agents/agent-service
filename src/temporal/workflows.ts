@@ -117,30 +117,7 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
   const history = [...(input.messages || [])];
   const initialUserMessage = history.length > 0 ? history[history.length - 1] : null;
 
-  const recordFinalUsage = async (finalStatus: string, finalResponseOverride?: string) => {
-    if (usageRecorded) return;
-    usageRecorded = true;
-    
-    try {
-      await recordUsage({
-          execution_id: input.traceId,
-          resource_id: input.slug,
-          resource_type: 'agent',
-          action_type: 'execution',
-          api_key: input.apiKeyId || input.apiKey,
-          user_id: input.userId,
-          total_input_tokens: totalUsage.prompt_tokens,
-          total_completion_tokens: totalUsage.completion_tokens,
-          total_tokens: totalUsage.total_tokens,
-          total_cost: totalCost,
-          initial_request: initialUserMessage,
-          final_response: finalResponseOverride || finalAssistantResponse || 'No content returned',
-          llm_calls: llmUsageHistory
-      });
-    } catch (e) {
-      console.error('Failed to record final usage:', e);
-    }
-  };
+  let recordIncrementalUsage: (status: string, incrementalUsage?: any, overrideResponse?: string) => Promise<void> = async () => {};
 
   // Thresholds with defaults
   const maxIterations = input.maxIterations || 10;
@@ -190,9 +167,9 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
     emitEvent('info', { status: 'fetching_config' });
     const agentConfig = await getAgentConfig(input.slug);
     
-    // 1.5 Check Credits Balance
+    // 1.5 Check Credits Balance (Initial)
     if (input.userId) {
-        await checkBalance(input.userId, totalCost);
+        await checkBalance(input.userId, 0); 
     }
     
     emitEvent('info', { 
@@ -205,6 +182,35 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
         server_id: c.server_id || 'NULL'
       }))
     });
+
+    recordIncrementalUsage = async (status: string, incrementalUsage?: any, overrideResponse?: string) => {
+      try {
+        const usagePayload: any = {
+            execution_id: input.traceId,
+            resource_id: input.slug,
+            resource_type: 'agent',
+            action_type: 'execution',
+            api_key: input.apiKeyId || input.apiKey,
+            user_id: input.userId,
+            total_input_tokens: incrementalUsage?.prompt_tokens || 0,
+            total_completion_tokens: incrementalUsage?.completion_tokens || 0,
+            total_tokens: incrementalUsage?.total_tokens || 0,
+            total_cost: incrementalUsage?.total_cost || 0,
+            initial_request: initialUserMessage,
+            final_response: overrideResponse || finalAssistantResponse || (status === 'RUNNING' ? 'In progress...' : 'No content'),
+            llm_calls: incrementalUsage ? [{
+                model: agentConfig.model_name,
+                tokens: incrementalUsage,
+                cost: incrementalUsage.total_cost || 0,
+                timestamp: new Date().toISOString()
+            }] : []
+        };
+        await recordUsage(usagePayload);
+      } catch (e: any) {
+        if (e.type === 'InsufficientCreditsError') throw e;
+        console.error('Failed to record incremental usage:', e);
+      }
+    };
 
     // 2. Build System Prompt
     const userLastPrompt = history[history.length - 1]?.content || '';
@@ -220,7 +226,6 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
     let turn = 1;
     
     // --- ENSURE FIRST MESSAGE ---
-    // Some providers (Nvidia NIM, Llama) fail if tools are provided without a first user message
     if (history.length === 0) {
       history.push({ role: 'user', content: 'Hello' });
       emitEvent('info', { status: 'injected_starter_message' });
@@ -232,7 +237,7 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
       // --- CONTEXT WINDOW MANAGEMENT ---
       const totalHistoryLength = JSON.stringify(history).length;
       if (totalHistoryLength > maxContextChars) {
-         emitEvent('info', { status: 'summarizing_history', current_length: totalHistoryLength });
+          emitEvent('info', { status: 'summarizing_history', current_length: totalHistoryLength });
           for (let i = 0; i < history.length - 1; i++) {
              if (history[i].content && history[i].content.length > 2000 && history[i].role !== 'system') {
                 const summaryResult = await summarizeContent({ 
@@ -247,23 +252,19 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
                     totalUsage.completion_tokens += summaryResult.usage.completion_tokens || 0;
                     totalUsage.total_tokens += summaryResult.usage.total_tokens || 0;
                     totalCost += summaryResult.usage.total_cost || 0;
-                    llmUsageHistory.push({
-                        type: 'summarization_history',
-                        tokens: summaryResult.usage,
-                        cost: summaryResult.usage.total_cost || 0,
-                        timestamp: new Date().toISOString()
-                    });
+                    
+                    // INCREMENTAL RECORDING (FOR SUMMARIZATION)
+                    await recordIncrementalUsage('RUNNING', summaryResult.usage);
                 }
                 
                 // Check balance after summarization
                 if (input.userId) {
-                    await checkBalance(input.userId, totalCost);
+                    await checkBalance(input.userId, 0);
                 }
              }
           }
       }
 
-      // Turn-based info is fine but no separate thinking event
       emitEvent('info', { status: 'executing_turn', turn });
       
       const payload: any = {
@@ -299,31 +300,22 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
       const assistantMessage = llmResponse.choices[0].message;
       const content = assistantMessage.content || '';
       
-      // Track detailed usage for platform reporting
+      // Track detailed usage
       if (llmResponse.usage) {
-        totalUsage.prompt_tokens += llmResponse.usage.prompt_tokens;
-        totalUsage.completion_tokens += llmResponse.usage.completion_tokens;
-        totalUsage.total_tokens += llmResponse.usage.total_tokens;
-        const currentCost = llmResponse.usage.total_cost || 0;
-        totalCost += currentCost;
+        const usage = llmResponse.usage;
+        totalUsage.prompt_tokens += usage.prompt_tokens;
+        totalUsage.completion_tokens += usage.completion_tokens;
+        totalUsage.total_tokens += usage.total_tokens;
+        totalCost += (usage.total_cost || 0);
 
-        // Store each LLM call
-        llmUsageHistory.push({
-            request: payload,
-            response: llmResponse,
-            tokens: llmResponse.usage,
-            cost: currentCost,
-            timestamp: new Date().toISOString()
-        });
+        // INCREMENTAL RECORDING (FOR MAIN TURN)
+        await recordIncrementalUsage('RUNNING', usage);
 
         // Check balance after primary LLM call
         if (input.userId) {
-            await checkBalance(input.userId, totalCost);
+            await checkBalance(input.userId, 0);
         }
       }
-
-      // No separate extraction or emission of thinking events. 
-      // Everything in 'content' will be handled by the refined cleaner below to avoid duplicates.
 
       let toolCalls = parseToolCalls(assistantMessage);
       let toolCallStrings: string[] = [];
@@ -406,16 +398,13 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
                 totalUsage.completion_tokens += summaryResult.usage.completion_tokens || 0;
                 totalUsage.total_tokens += summaryResult.usage.total_tokens || 0;
                 totalCost += summaryResult.usage.total_cost || 0;
-                llmUsageHistory.push({
-                    type: 'summarization_tool',
-                    tokens: summaryResult.usage,
-                    cost: summaryResult.usage.total_cost || 0,
-                    timestamp: new Date().toISOString()
-                });
+
+                // INCREMENTAL RECORDING (FOR TOOL OUTPUT SUMMARIZATION)
+                await recordIncrementalUsage('RUNNING', summaryResult.usage);
 
                 // Check balance after tool output summarization
                 if (input.userId) {
-                    await checkBalance(input.userId, totalCost);
+                    await checkBalance(input.userId, 0);
                 }
             }
           }
@@ -432,7 +421,9 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
     }
 
     emitEvent('end', { status: 'success', usage: totalUsage });
-    await recordFinalUsage('success');
+    
+    // Final update to set the finalized response
+    await recordIncrementalUsage('SUCCESS', undefined, finalAssistantResponse || 'Execution completed');
 
     return { status: 'completed', usage: totalUsage };
 
@@ -440,7 +431,6 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
     status = 'FAILED';
     console.error('Workflow execution error:', error);
     
-    // Extract the most specific error message from Temporal failures
     let errorMessage = error.message || 'Workflow internal error';
     if (error.cause && error.cause.message) {
         errorMessage = error.cause.message;
@@ -450,9 +440,8 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
 
     emitEvent('Error', { message: errorMessage });
     
-    // RECORD USAGE EVEN ON FAILURE
-    // This catches charges for turns done before failure
-    await recordFinalUsage('failed', `Error: ${errorMessage}`);
+    // FINAL RECORDING ON ERROR (No new tokens, just status update)
+    await recordIncrementalUsage('FAILED', undefined, `Error: ${errorMessage}`);
 
     throw error;
   } finally {
