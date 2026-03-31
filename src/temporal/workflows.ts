@@ -112,9 +112,35 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
   let totalUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
   let totalCost = 0;
   const llmUsageHistory: any[] = [];
-
+  let usageRecorded = false;
+  let finalAssistantResponse: string | null = null;
   const history = [...(input.messages || [])];
   const initialUserMessage = history.length > 0 ? history[history.length - 1] : null;
+
+  const recordFinalUsage = async (finalStatus: string, finalResponseOverride?: string) => {
+    if (usageRecorded) return;
+    usageRecorded = true;
+    
+    try {
+      await recordUsage({
+          execution_id: input.traceId,
+          resource_id: input.slug,
+          resource_type: 'agent',
+          action_type: 'execution',
+          api_key: input.apiKeyId || input.apiKey,
+          user_id: input.userId,
+          total_input_tokens: totalUsage.prompt_tokens,
+          total_completion_tokens: totalUsage.completion_tokens,
+          total_tokens: totalUsage.total_tokens,
+          total_cost: totalCost,
+          initial_request: initialUserMessage,
+          final_response: finalResponseOverride || finalAssistantResponse || 'No content returned',
+          llm_calls: llmUsageHistory
+      });
+    } catch (e) {
+      console.error('Failed to record final usage:', e);
+    }
+  };
 
   // Thresholds with defaults
   const maxIterations = input.maxIterations || 10;
@@ -166,7 +192,7 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
     
     // 1.5 Check Credits Balance
     if (input.userId) {
-        await checkBalance(input.userId);
+        await checkBalance(input.userId, totalCost);
     }
     
     emitEvent('info', { 
@@ -192,7 +218,6 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
 
     // 3. Execution Loop
     let turn = 1;
-    let finalAssistantResponse = null;
     
     // --- ENSURE FIRST MESSAGE ---
     // Some providers (Nvidia NIM, Llama) fail if tools are provided without a first user message
@@ -228,6 +253,11 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
                         cost: summaryResult.usage.total_cost || 0,
                         timestamp: new Date().toISOString()
                     });
+                }
+                
+                // Check balance after summarization
+                if (input.userId) {
+                    await checkBalance(input.userId, totalCost);
                 }
              }
           }
@@ -285,6 +315,11 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
             cost: currentCost,
             timestamp: new Date().toISOString()
         });
+
+        // Check balance after primary LLM call
+        if (input.userId) {
+            await checkBalance(input.userId, totalCost);
+        }
       }
 
       // No separate extraction or emission of thinking events. 
@@ -377,6 +412,11 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
                     cost: summaryResult.usage.total_cost || 0,
                     timestamp: new Date().toISOString()
                 });
+
+                // Check balance after tool output summarization
+                if (input.userId) {
+                    await checkBalance(input.userId, totalCost);
+                }
             }
           }
           emitEvent('tool_result', { name, result: toolContent, call_id: tc.id });
@@ -392,24 +432,7 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
     }
 
     emitEvent('end', { status: 'success', usage: totalUsage });
-
-    // RECORD USAGE IN PLATFORM SERVICE
-    // This happens asynchronously to avoid delaying the final response
-    await recordUsage({
-        execution_id: input.traceId,
-        resource_id: input.slug,
-        resource_type: 'agent',
-        action_type: 'execution',
-        api_key: input.apiKeyId || input.apiKey,
-        user_id: input.userId,
-        total_input_tokens: totalUsage.prompt_tokens,
-        total_completion_tokens: totalUsage.completion_tokens,
-        total_tokens: totalUsage.total_tokens,
-        total_cost: totalCost,
-        initial_request: initialUserMessage,
-        final_response: finalAssistantResponse || 'No content returned',
-        llm_calls: llmUsageHistory
-    });
+    await recordFinalUsage('success');
 
     return { status: 'completed', usage: totalUsage };
 
@@ -426,6 +449,11 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
     }
 
     emitEvent('Error', { message: errorMessage });
+    
+    // RECORD USAGE EVEN ON FAILURE
+    // This catches charges for turns done before failure
+    await recordFinalUsage('failed', `Error: ${errorMessage}`);
+
     throw error;
   } finally {
     completed = true;

@@ -214,7 +214,7 @@ export async function recordUsage(usage: any): Promise<void> {
   }
 }
 
-export async function checkBalance(userId: string, minAmount: number = 0.01): Promise<void> {
+export async function checkBalance(userId: string, currentSpent: number = 0, minAmount: number = 0.001): Promise<void> {
   try {
     const response = await axios.get(`${ENV.BILLING_SERVICE_URL}/backend/api/billing/balance`, {
       params: { userId },
@@ -224,9 +224,11 @@ export async function checkBalance(userId: string, minAmount: number = 0.01): Pr
     });
     
     const balance = parseFloat(response.data.balance || '0');
-    if (balance < minAmount) {
+    const effectiveBalance = balance - currentSpent;
+
+    if (effectiveBalance < minAmount) {
       throw ApplicationFailure.create({
-        message: `Insufficient balance: $${balance}. Minimum $${minAmount} required to start.`,
+        message: `Insufficient balance: $${balance.toFixed(4)}. Current session spent: $${currentSpent.toFixed(4)}. Effective balance: $${effectiveBalance.toFixed(4)}. Minimum $${minAmount} required to continue.`,
         type: 'InsufficientCreditsError',
         nonRetryable: true
       });
@@ -235,8 +237,6 @@ export async function checkBalance(userId: string, minAmount: number = 0.01): Pr
     if (error instanceof ApplicationFailure) throw error;
     
     console.error('Failed to check balance:', error.response?.data || error.message);
-    // Be permissive if billing service is down, or strict?
-    // User requested robustness, so maybe we log and continue unless it's a 402/403.
     if (error.response?.status === 402) {
       throw ApplicationFailure.create({
         message: 'Insufficient credits.',
