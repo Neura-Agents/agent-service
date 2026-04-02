@@ -79,21 +79,6 @@ export const getAgentCard = async (req: AuthenticatedRequest, res: Response) => 
                 in: "header",
                 name: "x-api-key"
             },
-            endpoints: {
-                invoke: `${agentUrl}/invoke`,
-                stream: `${agentUrl}/stream`,
-                health: `${agentUrl}/health`
-            },
-            supportedInterfaces: [
-                {
-                    transport: "http+sse",
-                    url: `${agentUrl}/stream`
-                },
-                {
-                    transport: "http",
-                    url: `${agentUrl}/invoke`
-                }
-            ],
             preferredTransport: "JSONRPC",
             skills: (agent.capabilities || []).map((cap: any) => ({
                 id: cap.capability_id,
