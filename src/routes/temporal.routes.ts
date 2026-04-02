@@ -1,6 +1,6 @@
 import { Router } from 'express';
-import { 
-  triggerTemporalWorkflow, 
+import {
+  triggerTemporalWorkflow,
   subscribeTemporalWorkflow,
   pauseTemporalWorkflow,
   resumeTemporalWorkflow,

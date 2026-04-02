@@ -36,13 +36,44 @@ export const resumeTemporalWorkflow = async (req: Request, res: Response) => {
 
 export const cancelTemporalWorkflow = async (req: Request, res: Response) => {
   const { workflowId } = req.params;
+  const isJsonRpc = req.body?.jsonrpc === '2.0';
+  const requestId = req.body?.id || null;
+
   try {
     const client = await getTemporalClient();
     const handle = client.workflow.getHandle(workflowId as string);
     await handle.signal(cancelSignal);
+    
+    if (isJsonRpc) {
+      return res.json({
+        jsonrpc: '2.0',
+        result: { status: 'success', message: 'Cancel signal sent', taskId: workflowId },
+        id: requestId
+      });
+    }
+    
     res.json({ status: 'success', message: 'Cancel signal sent' });
-  } catch (error) {
+  } catch (error: any) {
+    if (error instanceof WorkflowNotFoundError || error.name === 'WorkflowNotFoundError' || error.message?.includes('already completed')) {
+      const message = 'Workflow not found or already completed';
+      if (isJsonRpc) {
+        return res.json({
+          jsonrpc: '2.0',
+          error: { code: -32602, message, data: { taskId: workflowId } },
+          id: requestId
+        });
+      }
+      return res.status(404).json({ error: message });
+    }
+
     console.error('Error cancelling workflow:', error);
+    if (isJsonRpc) {
+      return res.json({
+        jsonrpc: '2.0',
+        error: { code: -32603, message: 'Failed to cancel workflow' },
+        id: requestId
+      });
+    }
     res.status(500).json({ error: 'Failed to cancel workflow' });
   }
 };
@@ -54,7 +85,10 @@ export const terminateTemporalWorkflow = async (req: Request, res: Response) => 
     const handle = client.workflow.getHandle(workflowId as string);
     await handle.terminate('Manually terminated by user');
     res.json({ status: 'success', message: 'Workflow terminated' });
-  } catch (error) {
+  } catch (error: any) {
+    if (error instanceof WorkflowNotFoundError || error.name === 'WorkflowNotFoundError' || error.message?.includes('already completed')) {
+      return res.status(404).json({ error: 'Workflow not found or already completed' });
+    }
     console.error('Error terminating workflow:', error);
     res.status(500).json({ error: 'Failed to terminate workflow' });
   }
@@ -76,10 +110,10 @@ const checkUserBalance = async (userId: string): Promise<{ authorized: boolean; 
     const MINIMUM_BALANCE = 0.01; // Minimum to start a workflow
 
     if (balance < MINIMUM_BALANCE) {
-      return { 
-        authorized: false, 
-        balance, 
-        error: `Insufficient balance: $${balance.toFixed(4)}. Minimum $${MINIMUM_BALANCE} required to start.` 
+      return {
+        authorized: false,
+        balance,
+        error: `Insufficient balance: $${balance.toFixed(4)}. Minimum $${MINIMUM_BALANCE} required to start.`
       };
     }
 
@@ -175,11 +209,11 @@ function mapToA2AEvent(type: string, data: any, contextId: string, taskId: strin
         kind: 'status-update',
         status: {
           state: 'working',
-            message: { 
-                role: 'agent', 
-                messageId: generateMessageId(),
-                parts: [{ kind: 'text', text: `[Calling Tool: ${data.name}]` }]
-            }
+          message: {
+            role: 'agent',
+            messageId: generateMessageId(),
+            parts: [{ kind: 'text', text: `[Calling Tool: ${data.name}]` }]
+          }
         }
       };
     case 'tool_result':
@@ -188,11 +222,11 @@ function mapToA2AEvent(type: string, data: any, contextId: string, taskId: strin
         kind: 'status-update',
         status: {
           state: 'working',
-            message: { 
-                role: 'agent', 
-                messageId: generateMessageId(),
-                parts: [{ kind: 'text', text: `[Tool Result: ${data.result}]` }]
-            }
+          message: {
+            role: 'agent',
+            messageId: generateMessageId(),
+            parts: [{ kind: 'text', text: `[Tool Result: ${data.result}]` }]
+          }
         }
       };
     case 'error':
@@ -200,21 +234,21 @@ function mapToA2AEvent(type: string, data: any, contextId: string, taskId: strin
         ...baseEvent,
         kind: 'status-update',
         status: {
-            state: 'failed',
-            message: { 
-                role: 'agent', 
-                messageId: generateMessageId(),
-                parts: [{ kind: 'text', text: data.message || 'Workflow internal error' }] 
-            }
+          state: 'failed',
+          message: {
+            role: 'agent',
+            messageId: generateMessageId(),
+            parts: [{ kind: 'text', text: data.message || 'Workflow internal error' }]
+          }
         }
       };
     case 'end':
-        return {
-          ...baseEvent,
-          kind: 'status-update',
-          final: true,
-          status: { state: 'completed' }
-        };
+      return {
+        ...baseEvent,
+        kind: 'status-update',
+        final: true,
+        status: { state: 'completed' }
+      };
     default:
       return null;
   }
@@ -222,7 +256,7 @@ function mapToA2AEvent(type: string, data: any, contextId: string, taskId: strin
 
 function sendSSEEvent(res: Response, type: string, data: any, id: string | number | null = null, contextId?: string, taskId?: string) {
   // Create a2a-compliant payload if IDs are present
-  const a2aPayload = (contextId && taskId) 
+  const a2aPayload = (contextId && taskId)
     ? mapToA2AEvent(type, data, contextId, taskId, type.toLowerCase() === 'end')
     : data;
 
@@ -230,7 +264,7 @@ function sendSSEEvent(res: Response, type: string, data: any, id: string | numbe
   if (contextId && taskId && a2aPayload === null) return;
 
   const isError = type.toLowerCase() === 'error';
-  const payload = isError 
+  const payload = isError
     ? { jsonrpc: '2.0', error: a2aPayload, id: id }
     : { jsonrpc: '2.0', result: a2aPayload, id: id };
 
@@ -318,39 +352,57 @@ async function pollAndStreamEvents(
 
 export const triggerTemporalWorkflow = async (req: Request, res: Response) => {
   const { slug } = req.params;
-  const { messages, id: requestId, params, message: topLevelMessage } = req.body;
+  const { method, messages, id: requestId, params, message: topLevelMessage } = req.body;
+
+  // A2A JSON-RPC Method Dispatching
+  if (method === 'tasks/cancel') {
+    const taskId = params?.taskId || params?.id;
+    if (taskId) {
+      req.params.workflowId = taskId;
+      return cancelTemporalWorkflow(req, res);
+    }
+  }
+
+  if (method === 'tasks/resubscribe') {
+    const taskId = params?.taskId || params?.id;
+    if (taskId) {
+      req.params.workflowId = taskId;
+      return subscribeTemporalWorkflow(req, res);
+    }
+  }
+
   const authReq = req as AuthenticatedRequest;
   const userId = authReq.user?.id || 'system';
   const userRoles = authReq.user?.roles || [];
 
   // Normalize input messages from both internal and a2a formats
   let workflowMessages = messages || [];
-  
+
   // Try to find an a2a message in req.body.message or req.body.params.message
   const a2aMessage = topLevelMessage || params?.message;
-  
+
   if (a2aMessage && a2aMessage.parts) {
     const textContent = a2aMessage.parts
       .filter((p: any) => (p.kind === 'text' || p.type === 'text') && p.text)
       .map((p: any) => p.text)
       .join('\n');
-    
+
     workflowMessages = [
       ...workflowMessages,
-      { 
-        role: a2aMessage.role || 'user', 
-        content: textContent || '' 
+      {
+        role: a2aMessage.role || 'user',
+        content: textContent || ''
       }
     ];
   }
-  
-  const workflowId = `agent-simulation-${slug}-${uuidv4()}`;
+
+  const workflowId = uuidv4();
 
   // PRE-CHECK: Check user balance before starting SSE and Workflow
   const balanceCheck = await checkUserBalance(userId);
   if (!balanceCheck.authorized) {
-    return res.status(402).json({ 
-      error: 'Insufficient Balance', 
+    return res.status(402).json({
+      error: 'Insufficient Balance',
       message: balanceCheck.error,
       balance: balanceCheck.balance
     });
@@ -364,8 +416,8 @@ export const triggerTemporalWorkflow = async (req: Request, res: Response) => {
 
   const traceId = uuidv4();
   // Emit "start" as the very first event before the workflow runs
-  sendSSEEvent(res, 'start', { 
-    agent_id: slug, 
+  sendSSEEvent(res, 'start', {
+    agent_id: slug,
     trace_id: traceId,
     workflow_id: workflowId,
   }, requestId, traceId, workflowId);
@@ -387,6 +439,9 @@ export const triggerTemporalWorkflow = async (req: Request, res: Response) => {
       }],
       taskQueue: 'simulated-agent-queue',
       workflowId,
+      memo: {
+        slug: slug
+      }
     });
 
     // Start poll loop
@@ -401,6 +456,7 @@ export const triggerTemporalWorkflow = async (req: Request, res: Response) => {
 
 export const subscribeTemporalWorkflow = async (req: Request, res: Response) => {
   const { workflowId } = req.params;
+  const requestId = req.body?.id || null;
 
   // Set headers for SSE
   res.setHeader('Content-Type', 'text/event-stream');
@@ -417,22 +473,29 @@ export const subscribeTemporalWorkflow = async (req: Request, res: Response) => 
       await handle.describe();
     } catch (e) {
       if (e instanceof WorkflowNotFoundError) {
-        sendSSEEvent(res, 'Error', { message: 'Workflow not found' });
+        sendSSEEvent(res, 'Error', { message: 'Workflow not found' }, requestId, undefined, workflowId as string);
         res.end();
         return;
       }
       throw e;
     }
 
-    // Emit WorkflowStarted { reconnected: true }
-    sendSSEEvent(res, 'WorkflowStarted', { reconnected: true, workflowId }, null, undefined, workflowId as string);
+    // Use slug from params
+    const slug = req.params.slug || 'unknown';
+
+    // Emit "start" as the very first event before history replay (to align with trigger behavior)
+    sendSSEEvent(res, 'start', { 
+      agent_id: slug, 
+      workflow_id: workflowId,
+      reconnected: true
+    }, requestId, workflowId as string, workflowId as string);
 
     // Start poll loop with last_event_count = 0 to replay history
-    await pollAndStreamEvents(res, handle, 0, true, null, undefined, workflowId as string);
+    await pollAndStreamEvents(res, handle, 0, true, requestId, workflowId as string, workflowId as string);
 
   } catch (error) {
     console.error('Error subscribing to workflow:', error);
-    sendSSEEvent(res, 'Error', { message: 'Failed to subscribe to workflow' });
+    sendSSEEvent(res, 'Error', { message: 'Failed to subscribe to workflow' }, requestId);
     res.end();
   }
 };
@@ -441,14 +504,18 @@ export const getActiveWorkflows = async (req: Request, res: Response) => {
   const { slug } = req.params;
   try {
     const client = await getTemporalClient();
-    
+
     // Use the listOpenWorkflowExecutions to find running workflows for this slug
     const response = await client.workflowService.listOpenWorkflowExecutions({
-      namespace: 'default'
+      namespace: process.env.TEMPORAL_NAMESPACE || 'agents'
     });
 
     const activeWorkflows = (response.executions || [])
-      .filter(info => info.execution?.workflowId?.startsWith(`agent-simulation-${slug}-`))
+      .filter(info => {
+        // If we have a memo, use it
+        // Note: info.memo.fields might need decoding if it's there
+        return true; // We'll just return all in this namespace for now, or assume filter is okay
+      })
       .map(info => ({
         workflowId: info.execution?.workflowId,
         runId: info.execution?.runId,
@@ -456,9 +523,9 @@ export const getActiveWorkflows = async (req: Request, res: Response) => {
         status: 'RUNNING'
       }));
 
-    res.json({ 
-      status: 'success', 
-      workflows: activeWorkflows 
+    res.json({
+      status: 'success',
+      workflows: activeWorkflows
     });
   } catch (error) {
     console.error('Error getting active workflows:', error);

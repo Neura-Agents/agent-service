@@ -12,7 +12,7 @@ async function run() {
     workflowsPath: require.resolve('./workflows'),
     activities,
     taskQueue: 'simulated-agent-queue',
-    namespace: 'default', // Using default namespace as it's the standard for local development
+    namespace: process.env.TEMPORAL_NAMESPACE || 'default',
   });
 
   console.log(`Worker is starting on ${address}...`);

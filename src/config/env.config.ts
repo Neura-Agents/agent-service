@@ -19,7 +19,7 @@ export const ENV = {
     INTERNAL_SERVICE_SECRET: process.env.INTERNAL_SERVICE_SECRET || 'super-secret-key',
     LITELLM: {
         API_KEY: process.env.LITELLM_API_KEY || '',
-        LITELLM_URL: process.env.LITELLM_URL || 'http://localhost:4000',
+        LITELLM_URL: process.env.LITELLM_URL || 'http://ai-gateway:4000',
     },
     FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:8080',
     TOOLS_SERVICE_URL: process.env.TOOLS_SERVICE_URL || 'http://localhost:3001',
