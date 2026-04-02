@@ -420,12 +420,13 @@ export async function SimulatedAgentWorkflow(input: SimulatedAgentInput): Promis
       turn++;
     }
 
-    emitEvent('end', { status: 'success', usage: totalUsage });
+    const finalUsage = { ...totalUsage, cost: totalCost };
+    emitEvent('end', { status: 'success', usage: finalUsage });
     
     // Final update to set the finalized response
     await recordIncrementalUsage('SUCCESS', undefined, finalAssistantResponse || 'Execution completed');
 
-    return { status: 'completed', usage: totalUsage };
+    return { status: 'completed', usage: finalUsage };
 
   } catch (error: any) {
     status = 'FAILED';
