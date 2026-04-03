@@ -73,8 +73,8 @@ export class AgentsService {
         const offset = (page - 1) * limit;
 
         try {
-            let whereClause = 'WHERE (user_id = $1 OR visibility = \'public\')';
-            const params: any[] = [userId];
+            let whereClause = 'WHERE 1=1';
+            const params: any[] = [];
 
             if (query) {
                 params.push(`%${query}%`);
@@ -135,11 +135,10 @@ export class AgentsService {
                    '[]'
                  ) as capabilities
                  FROM agents a 
-                 WHERE a.slug = $1 
-                 AND (a.visibility = 'public' OR a.user_id = $2)
+                 WHERE a.slug = $1
             `;
             
-            const result = await pool.query(query, [slug, requestingUserId || 'ANONYMOUS']);
+            const result = await pool.query(query, [slug]);
 
             if (result.rows.length === 0) return null;
             return result.rows[0];
@@ -161,8 +160,8 @@ export class AgentsService {
                     FROM agent_capabilities ac WHERE ac.agent_id = a.id),
                    '[]'
                  ) as capabilities
-                 FROM agents a WHERE (a.id::text = $1 OR a.slug = $1) AND (a.user_id = $2 OR a.visibility = 'public')`,
-                [idOrSlug, userId]
+                 FROM agents a WHERE (a.id::text = $1 OR a.slug = $1)`,
+                [idOrSlug]
             );
             return result.rows.length ? result.rows[0] : null;
         } catch (error) {

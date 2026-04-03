@@ -6,6 +6,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { AuthenticatedRequest } from '../middlewares/auth.middleware';
 import axios from 'axios';
 import { ENV } from '../config/env.config';
+import { AgentsService } from '../services/agents.service';
 
 
 export const pauseTemporalWorkflow = async (req: Request, res: Response) => {
@@ -351,8 +352,26 @@ async function pollAndStreamEvents(
 
 
 export const triggerTemporalWorkflow = async (req: Request, res: Response) => {
-  const { slug } = req.params;
+  const { slug } = req.params as { slug: string };
   const { method, messages, id: requestId, params, message: topLevelMessage } = req.body;
+  const authReq = req as AuthenticatedRequest;
+  const userId = authReq.user?.id || 'system';
+  const userRoles = authReq.user?.roles || [];
+
+  const agentsService = new AgentsService();
+  const agent = await agentsService.getAgentBySlug(slug, userId);
+  
+  if (!agent) {
+    return res.status(404).json({ error: 'Agent not found' });
+  }
+
+  // ENFORCEMENT: If private, only the owner can execute
+  if (agent.visibility === 'private' && agent.user_id !== userId) {
+    return res.status(403).json({ 
+      error: 'Unauthorized', 
+      message: 'This agent is private. Only the creator can execute it.' 
+    });
+  }
 
   // A2A JSON-RPC Method Dispatching
   if (method === 'tasks/cancel') {
@@ -370,10 +389,6 @@ export const triggerTemporalWorkflow = async (req: Request, res: Response) => {
       return subscribeTemporalWorkflow(req, res);
     }
   }
-
-  const authReq = req as AuthenticatedRequest;
-  const userId = authReq.user?.id || 'system';
-  const userRoles = authReq.user?.roles || [];
 
   // Normalize input messages from both internal and a2a formats
   let workflowMessages = messages || [];
