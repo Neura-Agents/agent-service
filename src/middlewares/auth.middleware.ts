@@ -100,10 +100,7 @@ export const authenticate = async (req: AuthenticatedRequest, res: Response, nex
                     id: decoded.sub,
                     username: decoded.preferred_username,
                     email: decoded.email,
-                    roles: [
-                        ...(decoded.realm_access?.roles || []),
-                        ...(decoded.resource_access?.['neura-agents-client']?.roles || [])
-                    ]
+                    roles: decoded.realm_access?.roles || []
                 };
 
                 // Fetch default API key for this user for tracking during this session
