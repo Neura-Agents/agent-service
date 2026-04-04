@@ -405,10 +405,10 @@ export async function buildSystemPrompt(input: {
       template = await fs.readFile(templatePath, 'utf8');
       template = template.replace(/^---[\s\S]*?---\n*/, '');
     }
-  } catch (err) {
+  } catch (err: any) {
     console.error('Prompt selection error:', err);
     throw ApplicationFailure.create({
-      message: 'System prompt template missing or database error',
+      message: `System prompt template missing or database error: ${err.message}`,
       type: 'TemplateError',
       nonRetryable: true
     });

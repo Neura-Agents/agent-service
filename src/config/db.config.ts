@@ -8,6 +8,7 @@ export const pool = new Pool({
     user: ENV.DB.DB_USER,
     password: ENV.DB.DB_PASSWORD,
     database: ENV.DB.DB_NAME,
+    options: `-c search_path=${ENV.DB.DB_SCHEMA},public`,
 });
 
 export const initDb = async () => {
@@ -16,7 +17,7 @@ export const initDb = async () => {
             CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
             CREATE TABLE IF NOT EXISTS agents (
-                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 name VARCHAR(255) NOT NULL,
                 slug VARCHAR(255) UNIQUE NOT NULL,
                 icon VARCHAR(255) DEFAULT 'UserCircle02Icon',

@@ -6,7 +6,7 @@ import logger from '../config/logger';
 import { ENV } from '../config/env.config';
 
 const client = jwksClient({
-    jwksUri: `${ENV.KEYCLOAK?.ISSUER_URL || `http://keycloak:8080/realms/${ENV.KEYCLOAK?.REALM || 'neura-agents'}`}/protocol/openid-connect/certs`,
+    jwksUri: `${ENV.KEYCLOAK?.ISSUER_URL || `http://keycloak:8080/realms/${ENV.KEYCLOAK?.REALM || 'agentic-ai'}`}/protocol/openid-connect/certs`,
     cache: true,
     rateLimit: true,
     jwksRequestsPerMinute: 5
@@ -24,7 +24,7 @@ function getKey(header: any, callback: any) {
 }
 
 export interface AuthenticatedRequest extends Request {
-        user?: {
+    user?: {
         id: string;
         username?: string;
         email?: string;
@@ -110,7 +110,7 @@ export const authenticate = async (req: AuthenticatedRequest, res: Response, nex
                     });
                     if (defaultKeyRes.data.found) {
                         req.user.apiKeyId = defaultKeyRes.data.data.id;
-                        req.user.apiKey = defaultKeyRes.data.data.api_key_hash; 
+                        req.user.apiKey = defaultKeyRes.data.data.api_key_hash;
                     }
                 } catch (err: any) {
                     logger.warn({ userId: decoded.sub, error: err.message }, 'Auth Middleware: Failed to fetch default API key');
@@ -180,6 +180,6 @@ export const tryAuthenticate = async (req: AuthenticatedRequest, res: Response, 
         // Silently fail authentication for "try" middleware
         logger.debug({ err: (err as any).message }, 'Try-Auth: Token verification failed (ignoring)');
     }
-    
+
     next();
 };
