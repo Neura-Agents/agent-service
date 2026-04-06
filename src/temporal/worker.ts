@@ -1,7 +1,7 @@
 import { Worker, NativeConnection } from '@temporalio/worker';
 import * as activities from './activities';
 
-async function run() {
+export async function runWorker() {
   const address = process.env.TEMPORAL_ADDRESS || 'localhost:7233';
   const connection = await NativeConnection.connect({
     address,
@@ -19,7 +19,3 @@ async function run() {
   await worker.run();
 }
 
-run().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
