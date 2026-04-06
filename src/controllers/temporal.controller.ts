@@ -522,8 +522,9 @@ export const getActiveWorkflows = async (req: Request, res: Response) => {
 
     // Use the listOpenWorkflowExecutions to find running workflows for this slug
     const response = await client.workflowService.listOpenWorkflowExecutions({
-      namespace: process.env.TEMPORAL_NAMESPACE || 'agents'
+      namespace: ENV.TEMPORAL.NAMESPACE
     });
+
 
     const activeWorkflows = (response.executions || [])
       .filter(info => {

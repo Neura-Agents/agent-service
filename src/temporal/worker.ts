@@ -1,8 +1,10 @@
 import { Worker, NativeConnection } from '@temporalio/worker';
 import * as activities from './activities';
+import { ENV } from '../config/env.config';
+
 
 export async function runWorker() {
-  const address = process.env.TEMPORAL_ADDRESS || 'localhost:7233';
+  const address = ENV.TEMPORAL.ADDRESS;
   const connection = await NativeConnection.connect({
     address,
   });
@@ -12,8 +14,9 @@ export async function runWorker() {
     workflowsPath: require.resolve('./workflows'),
     activities,
     taskQueue: 'simulated-agent-queue',
-    namespace: process.env.TEMPORAL_NAMESPACE || 'default',
+    namespace: ENV.TEMPORAL.NAMESPACE,
   });
+
 
   console.log(`Worker is starting on ${address}...`);
   await worker.run();

@@ -31,5 +31,10 @@ export const ENV = {
         ISSUER_URL: process.env.KEYCLOAK_ISSUER_URL || 'http://keycloak:8080/realms/agentic-ai',
         PUBLIC_ISSUER_URL: process.env.KEYCLOAK_PUBLIC_ISSUER_URL || 'http://localhost:8081/realms/agentic-ai',
         REALM: process.env.KEYCLOAK_REALM || 'agentic-ai'
+    },
+    TEMPORAL: {
+        ADDRESS: process.env.TEMPORAL_ADDRESS || 'temporal:7233',
+        NAMESPACE: process.env.TEMPORAL_NAMESPACE || 'agents',
     }
 };
+
