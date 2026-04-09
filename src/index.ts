@@ -28,7 +28,7 @@ app.use((req, res, next) => {
 app.get('/:slug/.well-known/agent.json', tryAuthenticate, getAgentCard);
 
 // Protected Routes
-app.use('/backend/api/models', authenticate, modelsRoutes);
+app.use('/backend/api/models', modelsRoutes);
 app.use('/backend/api/agents', authenticate, agentRoutes);
 app.use('/', temporalRoutes);
 
